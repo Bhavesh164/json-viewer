@@ -33,39 +33,9 @@ public struct TextEditorView: View {
                     .frame(height: 16)
                 
                 Button(action: {
-                    model.formatJSON()
-                }) {
-                    Label("Format", systemImage: "text.alignleft")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                
-                Button(action: {
-                    model.removeWhitespace()
-                }) {
-                    Label("Remove white space", systemImage: "arrow.right.to.line.compact")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                
-                Divider()
-                    .frame(height: 16)
-                
-                Button(action: {
                     model.clearText()
                 }) {
                     Label("Clear", systemImage: "trash")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                
-                Divider()
-                    .frame(height: 16)
-                
-                Button(action: {
-                    model.isLoadURLSheetPresented = true
-                }) {
-                    Label("Load JSON data", systemImage: "globe")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -121,14 +91,14 @@ public struct TextEditorView: View {
             
             Divider()
             
-            // Editor Area with Line Numbers
+            // Editor Area with Native Text Editor
             NativeCodeEditor(text: $model.rawText, fontSize: model.fontSize)
                 .overlay(alignment: .topLeading) {
                     if model.rawText.isEmpty {
                         Text("Paste the JSON code here (your code is not saved anywhere)")
                             .font(.system(size: model.fontSize, design: .monospaced))
                             .foregroundColor(.secondary.opacity(0.6))
-                            .padding(.leading, 52)
+                            .padding(.leading, 12)
                             .padding(.top, 10)
                             .allowsHitTesting(false)
                     }
@@ -192,7 +162,7 @@ public struct TextEditorView: View {
     }
 }
 
-// MARK: - AppKit Native Editor with Line Number Gutter
+// MARK: - AppKit High-Performance Native Code Editor
 struct NativeCodeEditor: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat = 13
@@ -216,12 +186,20 @@ struct NativeCodeEditor: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
+        textView.smartInsertDeleteEnabled = false
         textView.allowsUndo = true
         textView.isRichText = false
+        
+        // Critical for performance: only lay out visible text lines instead of calculating millions of glyphs
+        textView.layoutManager?.allowsNonContiguousLayout = true
+        
         textView.string = text
         textView.delegate = context.coordinator
         
-        // Padding for gutter
         textView.textContainer?.lineFragmentPadding = 8
         
         scrollView.documentView = textView
@@ -232,10 +210,21 @@ struct NativeCodeEditor: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? NSTextView else { return }
+        
         if textView.font?.pointSize != fontSize {
             textView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         }
-        if textView.string != text {
+        
+        // If the update was triggered by the user typing directly in this textView, skip immediately!
+        // This eliminates redundant string comparisons and avoids resetting the undo manager while typing.
+        if context.coordinator.isUpdatingFromTextView {
+            return
+        }
+        
+        // Fast integer length check before performing an expensive full-string comparison
+        let currentLength = (textView.string as NSString).length
+        let newLength = (text as NSString).length
+        if currentLength != newLength || textView.string != text {
             let selectedRanges = textView.selectedRanges
             textView.undoManager?.removeAllActions()
             textView.string = text
@@ -246,6 +235,7 @@ struct NativeCodeEditor: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeCodeEditor
         weak var textView: NSTextView?
+        var isUpdatingFromTextView: Bool = false
         
         init(_ parent: NativeCodeEditor) {
             self.parent = parent
@@ -253,8 +243,11 @@ struct NativeCodeEditor: NSViewRepresentable {
         
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
-            if parent.text != tv.string {
-                parent.text = tv.string
+            isUpdatingFromTextView = true
+            parent.text = tv.string
+            // Clear flag asynchronously after SwiftUI finishes this update cycle
+            DispatchQueue.main.async { [weak self] in
+                self?.isUpdatingFromTextView = false
             }
         }
     }

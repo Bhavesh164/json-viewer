@@ -257,6 +257,16 @@ do {
     assertTest(model.searchQuery.isEmpty && model.searchResults.isEmpty && model.searchStatus.isEmpty, "clearSearch resets all search state")
 }
 
+// 7c. Test Properties Visibility Toggle
+do {
+    let model = JSONDocumentModel()
+    assertTest(model.isPropertiesVisible == true, "Properties visible by default")
+    model.toggleProperties()
+    assertTest(model.isPropertiesVisible == false, "Properties hidden after toggle")
+    model.toggleProperties()
+    assertTest(model.isPropertiesVisible == true, "Properties shown again after second toggle")
+}
+
 // 8. Test Error Reporting on Malformed JSON
 do {
     let malformed = """

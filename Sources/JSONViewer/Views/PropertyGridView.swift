@@ -76,6 +76,18 @@ public struct PropertyGridView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
+                
+                Button(action: {
+                    model.toggleProperties()
+                }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Hide Properties Panel (Cmd+Option+P)")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)

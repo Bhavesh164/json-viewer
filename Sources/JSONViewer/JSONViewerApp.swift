@@ -8,7 +8,7 @@ struct JSONViewerApp: App {
     var body: some Scene {
         WindowGroup {
             MainView()
-                .navigationTitle("JSON Viewer & Formatter")
+                .navigationTitle("JSON Viewer")
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
@@ -19,26 +19,7 @@ struct JSONViewerApp: App {
                 }
             }
             
-            CommandGroup(after: .newItem) {
-                Button("Load JSON from URL...") {
-                    NotificationCenter.default.post(name: .loadURLRequested, object: nil)
-                }
-                .keyboardShortcut("l", modifiers: [.command])
-            }
-            
             CommandMenu("JSON") {
-                Button("Format JSON (Pretty Print)") {
-                    NotificationCenter.default.post(name: .formatRequested, object: nil)
-                }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
-                
-                Button("Remove White Space (Minify)") {
-                    NotificationCenter.default.post(name: .minifyRequested, object: nil)
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
-                
-                Divider()
-                
                 Button("Clear Editor") {
                     NotificationCenter.default.post(name: .clearRequested, object: nil)
                 }
@@ -58,6 +39,13 @@ struct JSONViewerApp: App {
             }
             
             CommandMenu("View") {
+                Button("Toggle Properties Panel") {
+                    NotificationCenter.default.post(name: .togglePropertiesRequested, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: [.command, .option])
+                
+                Divider()
+                
                 Button("Zoom In") {
                     NotificationCenter.default.post(name: .zoomInRequested, object: nil)
                 }
@@ -92,9 +80,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // Notification names for global shortcuts / menu bar commands
 extension Notification.Name {
-    static let loadURLRequested = Notification.Name("loadURLRequested")
-    static let formatRequested = Notification.Name("formatRequested")
-    static let minifyRequested = Notification.Name("minifyRequested")
+    static let togglePropertiesRequested = Notification.Name("togglePropertiesRequested")
     static let clearRequested = Notification.Name("clearRequested")
     static let expandAllRequested = Notification.Name("expandAllRequested")
     static let collapseAllRequested = Notification.Name("collapseAllRequested")

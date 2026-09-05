@@ -64,25 +64,54 @@ public final class JSONDocumentModel: ObservableObject {
     @Published public var searchStatus: String = ""
     @Published public var lastExecutedSearchQuery: String = ""
     
-    // Sheets
-    @Published public var isLoadURLSheetPresented: Bool = false
+    // Sheets & UI Panels
     @Published public var isAboutSheetPresented: Bool = false
-    @Published public var isURLSubmitting: Bool = false
-    @Published public var urlInput: String = "https://"
-    @Published public var urlErrorMessage: String?
+    @Published public var isPropertiesVisible: Bool = true
     
     // Status metrics
     public var isDirty: Bool = false
     @Published public private(set) var characterCount: Int = 0
     @Published public private(set) var lineCount: Int = 1
     
-    private func updateTextMetrics() {
-        characterCount = rawText.count
-        var count = 1
-        for byte in rawText.utf8 {
-            if byte == 0x0A { count += 1 }
+    private var metricsWorkItem: DispatchWorkItem?
+    
+    public func updateTextMetrics(immediate: Bool = false) {
+        metricsWorkItem?.cancel()
+        let text = rawText
+        
+        if text.isEmpty {
+            self.characterCount = 0
+            self.lineCount = 1
+            return
         }
-        lineCount = count
+        
+        // Fast path for small documents (< 15KB) or synchronous requests
+        if immediate || text.count < 15_000 {
+            let chars = (text as NSString).length
+            var count = 1
+            for byte in text.utf8 {
+                if byte == 0x0A { count += 1 }
+            }
+            self.characterCount = chars
+            self.lineCount = count
+            return
+        }
+        
+        // Debounce calculation off the main thread during continuous typing
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            let chars = (text as NSString).length
+            var count = 1
+            for byte in text.utf8 {
+                if byte == 0x0A { count += 1 }
+            }
+            DispatchQueue.main.async {
+                self.characterCount = chars
+                self.lineCount = count
+            }
+        }
+        metricsWorkItem = work
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.12, execute: work)
     }
     
     public init() {
@@ -170,39 +199,9 @@ public final class JSONDocumentModel: ObservableObject {
         self.isErrorAlertPresented = true
     }
     
-    // MARK: - Formatting & Minification
-    public func formatJSON() {
-        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        
-        do {
-            let parsed = try JSONParser.parse(trimmed)
-            self.jsonValue = parsed
-            self.rawText = parsed.format(indentSpaces: 2)
-            self.parseError = nil
-        } catch let err as JSONParseError {
-            self.parseError = err
-            showError("Cannot format invalid JSON: \(err.message) at line \(err.line), col \(err.column)")
-        } catch {
-            showError("Cannot format JSON: \(error.localizedDescription)")
-        }
-    }
-    
-    public func removeWhitespace() {
-        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        
-        do {
-            let parsed = try JSONParser.parse(trimmed)
-            self.jsonValue = parsed
-            self.rawText = parsed.minify()
-            self.parseError = nil
-        } catch let err as JSONParseError {
-            self.parseError = err
-            showError("Cannot minify invalid JSON: \(err.message) at line \(err.line), col \(err.column)")
-        } catch {
-            showError("Cannot minify JSON: \(error.localizedDescription)")
-        }
+    // MARK: - UI Panels
+    public func toggleProperties() {
+        isPropertiesVisible.toggle()
     }
     
     public func clearText() {
@@ -511,44 +510,7 @@ public final class JSONDocumentModel: ObservableObject {
         }
         return nil
     }
-    
-    // MARK: - Remote JSON Loading
-    public func loadRemoteJSON(from urlString: String) async {
-        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)),
-              url.scheme == "http" || url.scheme == "https" else {
-            urlErrorMessage = "Please enter a valid HTTP or HTTPS URL"
-            return
-        }
-        
-        isURLSubmitting = true
-        urlErrorMessage = nil
-        
-        do {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 15.0
-            request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
-            request.setValue("JSONViewer-macOS/1.0", forHTTPHeaderField: "User-Agent")
-            
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
-                throw URLError(.badServerResponse)
-            }
-            
-            guard let string = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
-                throw URLError(.cannotDecodeContentData)
-            }
-            
-            self.rawText = string
-            self.formatJSON()
-            self.parseAndBuildTree(silent: true)
-            self.isURLSubmitting = false
-            self.isLoadURLSheetPresented = false
-        } catch {
-            self.isURLSubmitting = false
-            self.urlErrorMessage = "Error loading URL: \(error.localizedDescription)"
-        }
-    }
+
     
     // MARK: - File I/O
     public func openFile(url: URL) {

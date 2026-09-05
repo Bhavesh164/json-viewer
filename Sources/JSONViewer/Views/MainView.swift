@@ -35,25 +35,11 @@ public struct MainView: View {
             
             ToolbarItemGroup(placement: .automatic) {
                 Button(action: {
-                    model.formatJSON()
+                    model.toggleProperties()
                 }) {
-                    Label("Format", systemImage: "text.alignleft")
+                    Label(model.isPropertiesVisible ? "Hide Properties" : "Show Properties", systemImage: "sidebar.trailing")
                 }
-                .help("Format / Pretty Print (Cmd+Shift+F)")
-                
-                Button(action: {
-                    model.removeWhitespace()
-                }) {
-                    Label("Minify", systemImage: "arrow.right.to.line.compact")
-                }
-                .help("Remove Whitespace (Cmd+Shift+M)")
-                
-                Button(action: {
-                    model.isLoadURLSheetPresented = true
-                }) {
-                    Label("Load URL", systemImage: "globe")
-                }
-                .help("Load JSON from URL (Cmd+L)")
+                .help(model.isPropertiesVisible ? "Hide Properties Panel (Cmd+Option+P)" : "Show Properties Panel (Cmd+Option+P)")
                 
                 Button(action: {
                     model.isSearchVisible.toggle()
@@ -68,23 +54,14 @@ public struct MainView: View {
         } message: {
             Text(model.errorMessage)
         }
-        .sheet(isPresented: $model.isLoadURLSheetPresented) {
-            LoadURLSheet(model: model)
-        }
         .sheet(isPresented: $model.isAboutSheetPresented) {
             AboutSheet()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .formatRequested)) { _ in
-            model.formatJSON()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .minifyRequested)) { _ in
-            model.removeWhitespace()
+        .onReceive(NotificationCenter.default.publisher(for: .togglePropertiesRequested)) { _ in
+            model.toggleProperties()
         }
         .onReceive(NotificationCenter.default.publisher(for: .clearRequested)) { _ in
             model.clearText()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .loadURLRequested)) { _ in
-            model.isLoadURLSheetPresented = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .expandAllRequested)) { _ in
             model.expandAll()
@@ -113,8 +90,10 @@ public struct MainView: View {
                 TreeViewer(model: model)
                     .frame(minWidth: 320, maxWidth: .infinity)
                 
-                PropertyGridView(model: model)
-                    .frame(minWidth: 260, idealWidth: 340, maxWidth: 600)
+                if model.isPropertiesVisible {
+                    PropertyGridView(model: model)
+                        .frame(minWidth: 260, idealWidth: 340, maxWidth: 600)
+                }
             }
             
             if model.isSearchVisible {
@@ -134,8 +113,10 @@ public struct MainView: View {
                     TreeViewer(model: model)
                         .frame(minWidth: 280, maxWidth: .infinity)
                     
-                    PropertyGridView(model: model)
-                        .frame(minWidth: 220, idealWidth: 280, maxWidth: 500)
+                    if model.isPropertiesVisible {
+                        PropertyGridView(model: model)
+                            .frame(minWidth: 220, idealWidth: 280, maxWidth: 500)
+                    }
                 }
                 
                 if model.isSearchVisible {

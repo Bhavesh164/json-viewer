@@ -142,10 +142,19 @@ struct FlatTreeNodeRow: View, Equatable {
     }
     
     private var isBigText: Bool {
-        if case .string(let s) = row.node.value {
-            return s.count > 40 || s.contains("\n")
+        guard case .string(let s) = row.node.value else { return false }
+        // Multi-line strings have explicit newlines and cannot fit on a single line
+        if s.contains("\n") {
+            return true
         }
-        return false
+        // Calculate whether the key and value fit horizontally within the visible screen/viewport
+        let charWidth = fontSize * 0.62
+        let leadingIndent = CGFloat(row.depth * 18)
+        let iconsAndSpacing = 18.0 + max(16.0, fontSize + 4.0) + 8.0
+        let totalTextChars = CGFloat(row.node.key.count + 3 + s.count + 2) // key + " : " + '"' + s + '"'
+        let requiredWidth = leadingIndent + iconsAndSpacing + (totalTextChars * charWidth)
+        let availableWidth = max(200.0, viewportWidth - 48.0)
+        return requiredWidth > availableWidth
     }
     
     private var expandedBoxWidth: CGFloat {
@@ -306,7 +315,7 @@ struct FlatTreeNodeRow: View, Equatable {
                 }
                 .frame(width: expandedBoxWidth, alignment: .leading)
             } else {
-                // Collapsed Leaf row (standard single line with expand indicator if big text)
+                // Collapsed Leaf row (standard single line with expand indicator only if text overflows screen)
                 HStack(spacing: 4) {
                     if isBigText {
                         Button(action: {
@@ -326,24 +335,8 @@ struct FlatTreeNodeRow: View, Equatable {
                         }
                         .buttonStyle(.plain)
                         .onHover { isKeyHovered = $0 }
-                        .help("Click key to expand full text")
-                    } else {
-                        Text(row.node.key)
-                            .font(.system(size: fontSize, weight: .medium, design: .monospaced))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                        Text(":")
-                            .font(.system(size: fontSize, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
-                    
-                    Text(row.node.valueStringRepresentation)
-                        .font(.system(size: fontSize, design: .monospaced))
-                        .foregroundColor(row.node.typeColor)
-                        .lineLimit(1)
-                    
-                    if isBigText {
+                        .help("Click key to expand text")
+                        
                         Button(action: {
                             withAnimation(.easeInOut(duration: 0.15)) {
                                 model.toggleExpandLeaf(nodeId: row.node.id)
@@ -362,8 +355,22 @@ struct FlatTreeNodeRow: View, Equatable {
                             .cornerRadius(3)
                         }
                         .buttonStyle(.plain)
-                        .help("Click to see full text")
+                        .help("Text overflows visible width. Click to expand full text.")
+                    } else {
+                        Text(row.node.key)
+                            .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        Text(":")
+                            .font(.system(size: fontSize, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
                     }
+                    
+                    Text(row.node.valueStringRepresentation)
+                        .font(.system(size: fontSize, design: .monospaced))
+                        .foregroundColor(row.node.typeColor)
+                        .lineLimit(1)
                 }
                 .fixedSize(horizontal: true, vertical: false)
             }

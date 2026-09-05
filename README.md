@@ -64,19 +64,12 @@ Inspect element properties in a 2-column table with click-to-jump tree synchroni
 
 ---
 
-### 3. Native Text Editor & 2-Space Formatter
+### 3. Native Text Editor
 A full-featured code editor with instant syntax feedback:
 
-<p align="center">
-  <img src="assets/screenshots/text-editor.png" width="100%" alt="Text Editor and Formatter" />
-</p>
-
-- ⚡ **Classic Web Toolbar Actions**:
+- ⚡ **Editor Actions**:
   - **Paste / Copy**: Fast clipboard integration.
-  - **Format**: Prettifies JSON using standard **2-space indentation** matching `jsonviewer.stack.hu`.
-  - **Remove white space**: High-speed minification preserving string literals.
   - **Clear**: Clears text buffer.
-  - **Load JSON data**: Remote URL dialog with built-in presets (GitHub API, HTTPBin, Mock Data).
 - 🛡️ **Syntax Validation**: Real-time error detection reporting exact line and column numbers.
 - 📊 **Status Bar**: Real-time line and character counter.
 - 📁 **Native macOS File Handling**: Open (`Cmd+O`) and Save (`Cmd+S`) `.json` files.
@@ -126,9 +119,9 @@ This compiles the release binary, creates the iconset, code-signs the app, insta
 ```bash
 ./build_app.sh run
 ```
-This builds `build/JSONViewer.app` and launches it directly from the build folder.
+This builds `build.noindex/JSONViewer.app` and launches it.
 
-### Run Automated Test Suite (62 Tests)
+### Run Automated Test Suite (54 Tests)
 ```bash
 swift run JSONViewerTests
 ```
@@ -139,10 +132,8 @@ swift run JSONViewerTests
 
 | Shortcut | Action |
 | :--- | :--- |
-| <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>F</kbd> | Format / Pretty Print JSON (2 spaces) |
-| <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>M</kbd> | Remove White Space / Minify |
+| <kbd>⌘</kbd> <kbd>⌥</kbd> <kbd>P</kbd> | Toggle Properties Panel (Show / Hide) |
 | <kbd>⌘</kbd> <kbd>K</kbd> | Clear Editor |
-| <kbd>⌘</kbd> <kbd>L</kbd> | Load JSON from URL |
 | <kbd>⌘</kbd> <kbd>F</kbd> | Focus Search Bar / Find |
 | <kbd>Enter</kbd> | Find Next Match (in Search Field) |
 | <kbd>⇧</kbd> <kbd>Enter</kbd> | Find Previous Match / Reverse (in Search Field) |
