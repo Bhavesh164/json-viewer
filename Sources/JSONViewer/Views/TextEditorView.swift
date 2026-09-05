@@ -237,6 +237,7 @@ struct NativeCodeEditor: NSViewRepresentable {
         }
         if textView.string != text {
             let selectedRanges = textView.selectedRanges
+            textView.undoManager?.removeAllActions()
             textView.string = text
             textView.selectedRanges = selectedRanges
         }

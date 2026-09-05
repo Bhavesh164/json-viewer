@@ -7,7 +7,12 @@ cd "$DIR"
 echo "==> Building JSONViewer in Release mode..."
 swift build -c release
 
-APP_BUNDLE="build/JSONViewer.app"
+# Use .noindex directory so macOS Spotlight and Launchpad never index intermediate build bundles
+BUILD_DIR="build.noindex"
+mkdir -p "$BUILD_DIR"
+touch "$BUILD_DIR/.metadata_never_index"
+
+APP_BUNDLE="$BUILD_DIR/JSONViewer.app"
 CONTENTS="$APP_BUNDLE/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -24,7 +29,7 @@ cp "Resources/Info.plist" "$CONTENTS/Info.plist"
 # Generate .icns if AppIcon.png exists
 if [ -f "Resources/AppIcon.png" ]; then
     echo "==> Creating iconset..."
-    ICONSET="build/AppIcon.iconset"
+    ICONSET="$BUILD_DIR/AppIcon.iconset"
     mkdir -p "$ICONSET"
     sips -z 16 16     Resources/AppIcon.png --out "$ICONSET/icon_16x16.png" >/dev/null 2>&1 || true
     sips -z 32 32     Resources/AppIcon.png --out "$ICONSET/icon_16x16@2x.png" >/dev/null 2>&1 || true
@@ -45,23 +50,25 @@ echo "==> Setting permissions & ad-hoc code signing..."
 chmod +x "$MACOS/JSONViewer"
 codesign --force --deep --sign - "$APP_BUNDLE"
 
+mkdir -p build
 ZIP_BUNDLE="build/JSONViewer-macOS.zip"
 echo "==> Packaging standalone zip: $ZIP_BUNDLE..."
 rm -f "$ZIP_BUNDLE"
 ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_BUNDLE"
 
-echo "==> Successfully created $APP_BUNDLE"
-echo "==> Successfully created $ZIP_BUNDLE (ready for GitHub Release)"
+# Remove any old unindexed app in build/ so Spotlight never sees two apps
+rm -rf build/JSONViewer.app
 
-if [ "$1" == "install" ]; then
-    echo "==> Installing to /Applications/JSONViewer.app..."
-    killall JSONViewer 2>/dev/null || true
-    rm -rf /Applications/JSONViewer.app
-    cp -R "$APP_BUNDLE" /Applications/JSONViewer.app
-    xattr -cr /Applications/JSONViewer.app
+echo "==> Installing latest build to /Applications/JSONViewer.app..."
+killall JSONViewer 2>/dev/null || true
+rm -rf /Applications/JSONViewer.app
+cp -R "$APP_BUNDLE" /Applications/JSONViewer.app
+xattr -cr /Applications/JSONViewer.app
+
+echo "==> Successfully installed latest JSONViewer to /Applications/JSONViewer.app"
+echo "==> Standalone zip available at $ZIP_BUNDLE"
+
+if [ "$1" == "run" ] || [ "$1" == "install" ]; then
     echo "==> Launching /Applications/JSONViewer.app..."
     open /Applications/JSONViewer.app
-elif [ "$1" == "run" ]; then
-    echo "==> Launching $APP_BUNDLE..."
-    open "$APP_BUNDLE"
 fi

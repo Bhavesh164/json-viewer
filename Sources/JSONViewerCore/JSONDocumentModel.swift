@@ -15,6 +15,7 @@ public final class JSONDocumentModel: ObservableObject {
     @Published public var rawText: String = "" {
         didSet {
             isDirty = true
+            updateTextMetrics()
         }
     }
     
@@ -58,6 +59,7 @@ public final class JSONDocumentModel: ObservableObject {
     @Published public var isSearchVisible: Bool = true
     @Published public var searchQuery: String = ""
     @Published public var searchResults: [JSONNode] = []
+    @Published public var searchResultIds: Set<String> = []
     @Published public var currentSearchIndex: Int = 0
     @Published public var searchStatus: String = ""
     @Published public var lastExecutedSearchQuery: String = ""
@@ -71,13 +73,16 @@ public final class JSONDocumentModel: ObservableObject {
     
     // Status metrics
     public var isDirty: Bool = false
-    public var characterCount: Int { rawText.count }
-    public var lineCount: Int {
+    @Published public private(set) var characterCount: Int = 0
+    @Published public private(set) var lineCount: Int = 1
+    
+    private func updateTextMetrics() {
+        characterCount = rawText.count
         var count = 1
         for byte in rawText.utf8 {
             if byte == 0x0A { count += 1 }
         }
-        return count
+        lineCount = count
     }
     
     public init() {
@@ -114,13 +119,11 @@ public final class JSONDocumentModel: ObservableObject {
     
     // MARK: - Tab Switching & Validation
     public func selectTab(_ tab: AppTab) {
-        if tab == .viewer || tab == .split {
-            let success = parseAndBuildTree(silent: false)
-            if success {
-                activeTab = tab
+        activeTab = tab
+        if (tab == .viewer || tab == .split) && (rootNode == nil || isDirty) {
+            DispatchQueue.main.async {
+                _ = self.parseAndBuildTree(silent: false)
             }
-        } else {
-            activeTab = tab
         }
     }
     
@@ -229,6 +232,7 @@ public final class JSONDocumentModel: ObservableObject {
     public func clearSearch() {
         searchQuery = ""
         searchResults = []
+        searchResultIds = []
         searchStatus = ""
         lastExecutedSearchQuery = ""
         currentSearchIndex = 0
@@ -259,6 +263,7 @@ public final class JSONDocumentModel: ObservableObject {
     private func performSearch(on root: JSONNode, query: String) {
         let matches = root.searchMatches(query: query)
         self.searchResults = matches
+        self.searchResultIds = Set(matches.map { $0.id })
         
         if matches.isEmpty {
             self.searchStatus = "Phrase not found!"
@@ -314,11 +319,17 @@ public final class JSONDocumentModel: ObservableObject {
         let target = searchResults[index]
         self.selectedNode = target
         
-        // Expand all ancestors to make node visible
+        // Expand all ancestors to make node visible (only rebuild rows if newly expanded!)
+        var didExpandAncestors = false
         for ancestorId in target.ancestorIds {
-            expandedNodeIds.insert(ancestorId)
+            if !expandedNodeIds.contains(ancestorId) {
+                expandedNodeIds.insert(ancestorId)
+                didExpandAncestors = true
+            }
         }
-        updateVisibleRows()
+        if didExpandAncestors {
+            updateVisibleRows()
+        }
         
         self.searchStatus = "\(index + 1) of \(searchResults.count) matches"
     }
@@ -449,10 +460,16 @@ public final class JSONDocumentModel: ObservableObject {
     }
     
     public func selectAndReveal(node: JSONNode) {
+        var didExpandAncestors = false
         for ancestorId in node.ancestorIds {
-            expandedNodeIds.insert(ancestorId)
+            if !expandedNodeIds.contains(ancestorId) {
+                expandedNodeIds.insert(ancestorId)
+                didExpandAncestors = true
+            }
         }
-        updateVisibleRows()
+        if didExpandAncestors {
+            updateVisibleRows()
+        }
         self.selectedNode = node
     }
     

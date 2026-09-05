@@ -71,9 +71,14 @@ public struct TreeViewer: View {
                                 ForEach(model.visibleTreeRows) { row in
                                     FlatTreeNodeRow(
                                         row: row,
-                                        model: model,
-                                        viewportWidth: geo.size.width
+                                        isSelected: model.selectedNode?.id == row.node.id,
+                                        isMatch: model.searchResultIds.contains(row.node.id),
+                                        isLeafExpanded: model.expandedLeafNodeIds.contains(row.node.id),
+                                        fontSize: model.fontSize,
+                                        viewportWidth: geo.size.width,
+                                        model: model
                                     )
+                                    .equatable()
                                 }
                             }
                             .padding(.vertical, 4)
@@ -113,21 +118,27 @@ public struct TreeViewer: View {
     }
 }
 
-struct FlatTreeNodeRow: View {
+struct FlatTreeNodeRow: View, Equatable {
     let row: FlatTreeRow
-    @ObservedObject var model: JSONDocumentModel
+    let isSelected: Bool
+    let isMatch: Bool
+    let isLeafExpanded: Bool
+    let fontSize: CGFloat
     var viewportWidth: CGFloat = 800
+    let model: JSONDocumentModel
+    
     @State private var isKeyHovered: Bool = false
     @State private var isCopied: Bool = false
     
-    private var isSelected: Bool {
-        model.selectedNode?.id == row.node.id
-    }
-    
-    private var isMatch: Bool {
-        if model.searchQuery.isEmpty { return false }
-        return row.node.displayText.localizedCaseInsensitiveContains(model.searchQuery) ||
-               row.node.path.localizedCaseInsensitiveContains(model.searchQuery)
+    static func == (lhs: FlatTreeNodeRow, rhs: FlatTreeNodeRow) -> Bool {
+        lhs.row.node.id == rhs.row.node.id &&
+        lhs.row.depth == rhs.row.depth &&
+        lhs.row.isExpanded == rhs.row.isExpanded &&
+        lhs.isSelected == rhs.isSelected &&
+        lhs.isMatch == rhs.isMatch &&
+        lhs.isLeafExpanded == rhs.isLeafExpanded &&
+        lhs.fontSize == rhs.fontSize &&
+        lhs.viewportWidth == rhs.viewportWidth
     }
     
     private var isBigText: Bool {
@@ -137,12 +148,8 @@ struct FlatTreeNodeRow: View {
         return false
     }
     
-    private var isLeafExpanded: Bool {
-        model.expandedLeafNodeIds.contains(row.node.id)
-    }
-    
     private var expandedBoxWidth: CGFloat {
-        let leadingIndent = 12.0 + CGFloat(row.depth * 18) + 18.0 + max(16.0, model.fontSize + 4.0) + 4.0
+        let leadingIndent = 12.0 + CGFloat(row.depth * 18) + 18.0 + max(16.0, fontSize + 4.0) + 4.0
         let trailingMargin = 36.0
         let available = viewportWidth - leadingIndent - trailingMargin
         return max(320.0, available)
@@ -162,7 +169,7 @@ struct FlatTreeNodeRow: View {
                     model.toggleExpand(nodeId: row.node.id)
                 }) {
                     Image(systemName: row.isExpanded ? "minus.square" : "plus.square")
-                        .font(.system(size: max(10, model.fontSize - 1), weight: .medium))
+                        .font(.system(size: max(10, fontSize - 1), weight: .medium))
                         .foregroundColor(.secondary)
                         .frame(width: 14, height: 14)
                 }
@@ -175,7 +182,7 @@ struct FlatTreeNodeRow: View {
                     }
                 }) {
                     Image(systemName: isLeafExpanded ? "text.badge.minus" : "text.badge.plus")
-                        .font(.system(size: max(10, model.fontSize - 1), weight: .medium))
+                        .font(.system(size: max(10, fontSize - 1), weight: .medium))
                         .foregroundColor(.accentColor)
                         .frame(width: 14, height: 14)
                 }
@@ -183,17 +190,17 @@ struct FlatTreeNodeRow: View {
                 .help(isLeafExpanded ? "Click to collapse full text" : "Click to expand full text")
             } else {
                 Color.clear
-                    .frame(width: 14, height: 1)
+                .frame(width: 14, height: 1)
             }
             
             // Type Icon Badge
             ZStack {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(row.node.typeColor.opacity(0.18))
-                    .frame(width: max(16, model.fontSize + 4), height: max(16, model.fontSize + 4))
+                    .frame(width: max(16, fontSize + 4), height: max(16, fontSize + 4))
                 
                 Image(systemName: row.node.systemIconName)
-                    .font(.system(size: max(8, model.fontSize - 3), weight: .bold))
+                    .font(.system(size: max(8, fontSize - 3), weight: .bold))
                     .foregroundColor(row.node.typeColor)
             }
             
@@ -201,12 +208,12 @@ struct FlatTreeNodeRow: View {
             if row.isContainer {
                 HStack(spacing: 4) {
                     Text(row.node.key == "JSON" ? "JSON" : row.node.key)
-                        .font(.system(size: model.fontSize, weight: .medium, design: .monospaced))
+                        .font(.system(size: fontSize, weight: .medium, design: .monospaced))
                         .foregroundColor(.primary)
                         .lineLimit(1)
                     
                     Text(row.node.typeBadgeText)
-                        .font(.system(size: max(9, model.fontSize - 2), weight: .semibold, design: .monospaced))
+                        .font(.system(size: max(9, fontSize - 2), weight: .semibold, design: .monospaced))
                         .foregroundColor(row.node.typeColor)
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
@@ -226,11 +233,11 @@ struct FlatTreeNodeRow: View {
                         }) {
                             HStack(spacing: 2) {
                                 Text(row.node.key)
-                                    .font(.system(size: model.fontSize, weight: .bold, design: .monospaced))
+                                    .font(.system(size: fontSize, weight: .bold, design: .monospaced))
                                     .foregroundColor(.accentColor)
                                     .underline()
                                 Text(":")
-                                    .font(.system(size: model.fontSize, design: .monospaced))
+                                    .font(.system(size: fontSize, design: .monospaced))
                                     .foregroundColor(.secondary)
                             }
                         }
@@ -246,7 +253,7 @@ struct FlatTreeNodeRow: View {
                                 Image(systemName: "chevron.up")
                                     .font(.system(size: 8, weight: .bold))
                                 Text("collapse")
-                                    .font(.system(size: max(8, model.fontSize - 3), weight: .semibold))
+                                    .font(.system(size: max(8, fontSize - 3), weight: .semibold))
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -268,14 +275,14 @@ struct FlatTreeNodeRow: View {
                                 Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                                 Text(isCopied ? "Copied!" : "Copy")
                             }
-                            .font(.system(size: max(8, model.fontSize - 3)))
+                            .font(.system(size: max(8, fontSize - 3)))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
                         
                         if case .string(let str) = row.node.value {
                             Text("\(str.count) chars")
-                                .font(.system(size: max(8, model.fontSize - 3), design: .monospaced))
+                                .font(.system(size: max(8, fontSize - 3), design: .monospaced))
                                 .foregroundColor(.secondary.opacity(0.6))
                         }
                         
@@ -284,7 +291,7 @@ struct FlatTreeNodeRow: View {
                     .frame(width: expandedBoxWidth, alignment: .leading)
                     
                     Text(row.node.valueStringRepresentation)
-                        .font(.system(size: model.fontSize, design: .monospaced))
+                        .font(.system(size: fontSize, design: .monospaced))
                         .foregroundColor(row.node.typeColor)
                         .lineLimit(nil)
                         .textSelection(.enabled)
@@ -309,11 +316,11 @@ struct FlatTreeNodeRow: View {
                         }) {
                             HStack(spacing: 2) {
                                 Text(row.node.key)
-                                    .font(.system(size: model.fontSize, weight: .semibold, design: .monospaced))
+                                    .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
                                     .foregroundColor(isKeyHovered ? .accentColor : .primary)
                                     .underline(isKeyHovered)
                                 Text(":")
-                                    .font(.system(size: model.fontSize, design: .monospaced))
+                                    .font(.system(size: fontSize, design: .monospaced))
                                     .foregroundColor(.secondary)
                             }
                         }
@@ -322,17 +329,17 @@ struct FlatTreeNodeRow: View {
                         .help("Click key to expand full text")
                     } else {
                         Text(row.node.key)
-                            .font(.system(size: model.fontSize, weight: .medium, design: .monospaced))
+                            .font(.system(size: fontSize, weight: .medium, design: .monospaced))
                             .foregroundColor(.primary)
                             .lineLimit(1)
                         Text(":")
-                            .font(.system(size: model.fontSize, design: .monospaced))
+                            .font(.system(size: fontSize, design: .monospaced))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                     }
                     
                     Text(row.node.valueStringRepresentation)
-                        .font(.system(size: model.fontSize, design: .monospaced))
+                        .font(.system(size: fontSize, design: .monospaced))
                         .foregroundColor(row.node.typeColor)
                         .lineLimit(1)
                     
@@ -346,7 +353,7 @@ struct FlatTreeNodeRow: View {
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 8, weight: .bold))
                                 Text("expand")
-                                    .font(.system(size: max(8, model.fontSize - 3), weight: .semibold))
+                                    .font(.system(size: max(8, fontSize - 3), weight: .semibold))
                             }
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1.5)
