@@ -41,12 +41,27 @@ if [ -f "Resources/AppIcon.png" ]; then
     rm -rf "$ICONSET"
 fi
 
-echo "==> Setting permissions..."
+echo "==> Setting permissions & ad-hoc code signing..."
 chmod +x "$MACOS/JSONViewer"
+codesign --force --deep --sign - "$APP_BUNDLE"
+
+ZIP_BUNDLE="build/JSONViewer-macOS.zip"
+echo "==> Packaging standalone zip: $ZIP_BUNDLE..."
+rm -f "$ZIP_BUNDLE"
+ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_BUNDLE"
 
 echo "==> Successfully created $APP_BUNDLE"
+echo "==> Successfully created $ZIP_BUNDLE (ready for GitHub Release)"
 
-if [ "$1" == "run" ]; then
-    echo "==> Launching JSONViewer.app..."
+if [ "$1" == "install" ]; then
+    echo "==> Installing to /Applications/JSONViewer.app..."
+    killall JSONViewer 2>/dev/null || true
+    rm -rf /Applications/JSONViewer.app
+    cp -R "$APP_BUNDLE" /Applications/JSONViewer.app
+    xattr -cr /Applications/JSONViewer.app
+    echo "==> Launching /Applications/JSONViewer.app..."
+    open /Applications/JSONViewer.app
+elif [ "$1" == "run" ]; then
+    echo "==> Launching $APP_BUNDLE..."
     open "$APP_BUNDLE"
 fi

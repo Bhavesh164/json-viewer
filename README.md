@@ -88,9 +88,24 @@ A full-featured code editor with instant syntax feedback:
 - **Virtualized Rendering**: High-performance lazy row rendering capable of smoothly navigating datasets with **15,840+ items** and 5MB+ payloads with zero UI lag.
 - **Pure Swift Engine**: Zero third-party runtime dependencies; built exclusively with AppKit and SwiftUI.
 
+## 📦 Installation (Pre-built App)
+
+1. Download **`JSONViewer-macOS.zip`** from the [GitHub Releases](../../releases).
+2. Double-click the downloaded `.zip` file to extract **`JSONViewer.app`**.
+3. Drag **`JSONViewer.app`** into your `/Applications` folder.
+
+> [!NOTE]
+> **First-time Opening on macOS (Gatekeeper)**:
+> Since this is an open-source application without an Apple Developer ID certificate:
+> - **Right-click** (or Control-click) `JSONViewer.app` and select **Open**, then click **Open** in the prompt.
+> - *Alternatively*, run this command once in Terminal:
+>   ```bash
+>   xattr -cr /Applications/JSONViewer.app
+>   ```
+
 ---
 
-## 🚀 Building and Running
+## 🚀 Building and Running from Source
 
 ### Prerequisites
 - macOS 13.0 (Ventura) or later
@@ -101,11 +116,17 @@ A full-featured code editor with instant syntax feedback:
 swift run
 ```
 
-### Build & Launch Standalone macOS App Bundle
+### Build & Install to `/Applications`
+```bash
+./build_app.sh install
+```
+This compiles the release binary, creates the iconset, code-signs the app, installs it to `/Applications/JSONViewer.app`, and launches it.
+
+### Build macOS App Bundle
 ```bash
 ./build_app.sh run
 ```
-This builds `build/JSONViewer.app` with icons and bundles it ready for macOS Finder.
+This builds `build/JSONViewer.app` and launches it directly from the build folder.
 
 ### Run Automated Test Suite (62 Tests)
 ```bash
