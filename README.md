@@ -144,6 +144,8 @@ swift run JSONViewerTests
 | <kbd>⌘</kbd> <kbd>K</kbd> | Clear Editor |
 | <kbd>⌘</kbd> <kbd>L</kbd> | Load JSON from URL |
 | <kbd>⌘</kbd> <kbd>F</kbd> | Focus Search Bar / Find |
+| <kbd>Enter</kbd> | Find Next Match (in Search Field) |
+| <kbd>⇧</kbd> <kbd>Enter</kbd> | Find Previous Match / Reverse (in Search Field) |
 | <kbd>⌘</kbd> <kbd>G</kbd> | Find Next Match |
 | <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>G</kbd> | Find Previous Match |
 | <kbd>⌘</kbd> <kbd>E</kbd> | Expand All Tree Nodes |

@@ -60,6 +60,7 @@ public final class JSONDocumentModel: ObservableObject {
     @Published public var searchResults: [JSONNode] = []
     @Published public var currentSearchIndex: Int = 0
     @Published public var searchStatus: String = ""
+    @Published public var lastExecutedSearchQuery: String = ""
     
     // Sheets
     @Published public var isLoadURLSheetPresented: Bool = false
@@ -207,9 +208,7 @@ public final class JSONDocumentModel: ObservableObject {
         rootNode = nil
         selectedNode = nil
         parseError = nil
-        searchQuery = ""
-        searchResults = []
-        searchStatus = ""
+        clearSearch()
     }
     
     // MARK: - Clipboard Operations
@@ -227,13 +226,22 @@ public final class JSONDocumentModel: ObservableObject {
     }
     
     // MARK: - Search
+    public func clearSearch() {
+        searchQuery = ""
+        searchResults = []
+        searchStatus = ""
+        lastExecutedSearchQuery = ""
+        currentSearchIndex = 0
+    }
+    
     public func searchStart() {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            searchResults = []
-            searchStatus = ""
+            clearSearch()
             return
         }
+        
+        lastExecutedSearchQuery = query
         
         guard let root = rootNode else {
             // Try building tree first
@@ -261,15 +269,44 @@ public final class JSONDocumentModel: ObservableObject {
     }
     
     public func searchNext() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        
+        if query != lastExecutedSearchQuery || searchResults.isEmpty {
+            searchStart()
+            return
+        }
+        
         guard !searchResults.isEmpty else { return }
         currentSearchIndex = (currentSearchIndex + 1) % searchResults.count
         selectMatch(at: currentSearchIndex)
     }
     
     public func searchPrevious() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        
+        if query != lastExecutedSearchQuery || searchResults.isEmpty {
+            searchStart()
+            if !searchResults.isEmpty {
+                currentSearchIndex = searchResults.count - 1
+                selectMatch(at: currentSearchIndex)
+            }
+            return
+        }
+        
         guard !searchResults.isEmpty else { return }
         currentSearchIndex = (currentSearchIndex - 1 + searchResults.count) % searchResults.count
         selectMatch(at: currentSearchIndex)
+    }
+    
+    /// Called on Enter or Shift+Enter in search field
+    public func searchSubmit(reverse: Bool = false) {
+        if reverse {
+            searchPrevious()
+        } else {
+            searchNext()
+        }
     }
     
     private func selectMatch(at index: Int) {

@@ -192,6 +192,71 @@ do {
     assertTest(false, "Failed to test search: \(error)")
 }
 
+// 7b. Test Search Navigation with Enter and Shift+Enter
+do {
+    let json = """
+    {
+      "users": [
+        { "name": "Alice", "role": "admin", "domain": "test.com" },
+        { "name": "Bob", "role": "user", "domain": "test.com" },
+        { "name": "Charlie", "role": "admin", "domain": "test.com" }
+      ]
+    }
+    """
+    let model = JSONDocumentModel()
+    model.rawText = json
+    _ = model.parseAndBuildTree(silent: true)
+    
+    // Initial search for "test.com" (3 matches) via Enter
+    model.searchQuery = "test.com"
+    model.searchSubmit(reverse: false)
+    assertTest(model.searchResults.count == 3, "Search finds 3 matches for 'test.com'")
+    assertTest(model.currentSearchIndex == 0, "First match selected at index 0")
+    assertTest(model.searchStatus == "1 of 3 matches", "Status displays '1 of 3 matches'")
+    
+    // Press Enter -> should advance to match 2
+    model.searchSubmit(reverse: false)
+    assertTest(model.currentSearchIndex == 1, "Second Enter advances to index 1")
+    assertTest(model.searchStatus == "2 of 3 matches", "Status displays '2 of 3 matches'")
+    
+    // Press Enter -> should advance to match 3
+    model.searchSubmit(reverse: false)
+    assertTest(model.currentSearchIndex == 2, "Third Enter advances to index 2")
+    assertTest(model.searchStatus == "3 of 3 matches", "Status displays '3 of 3 matches'")
+    
+    // Press Enter on last match -> should wrap back to match 1
+    model.searchSubmit(reverse: false)
+    assertTest(model.currentSearchIndex == 0, "Enter on last match wraps to index 0")
+    assertTest(model.searchStatus == "1 of 3 matches", "Status displays '1 of 3 matches'")
+    
+    // Press Shift+Enter -> should reverse back to match 3
+    model.searchSubmit(reverse: true)
+    assertTest(model.currentSearchIndex == 2, "Shift+Enter wraps back to index 2")
+    assertTest(model.searchStatus == "3 of 3 matches", "Status displays '3 of 3 matches'")
+    
+    // Press Shift+Enter -> should reverse back to match 2
+    model.searchSubmit(reverse: true)
+    assertTest(model.currentSearchIndex == 1, "Shift+Enter reverses to index 1")
+    assertTest(model.searchStatus == "2 of 3 matches", "Status displays '2 of 3 matches'")
+    
+    // Query change: type "admin" (2 matches) and press Enter
+    model.searchQuery = "admin"
+    model.searchSubmit(reverse: false)
+    assertTest(model.searchResults.count == 2, "New search 'admin' finds 2 matches")
+    assertTest(model.currentSearchIndex == 0, "New search resets to index 0")
+    assertTest(model.searchStatus == "1 of 2 matches", "Status displays '1 of 2 matches'")
+    
+    // Query change: non-existent phrase
+    model.searchQuery = "nonexistentxyz"
+    model.searchSubmit(reverse: false)
+    assertTest(model.searchResults.isEmpty, "Non-existent search produces 0 matches")
+    assertTest(model.searchStatus == "Phrase not found!", "Status displays 'Phrase not found!'")
+    
+    // Clear search
+    model.clearSearch()
+    assertTest(model.searchQuery.isEmpty && model.searchResults.isEmpty && model.searchStatus.isEmpty, "clearSearch resets all search state")
+}
+
 // 8. Test Error Reporting on Malformed JSON
 do {
     let malformed = """

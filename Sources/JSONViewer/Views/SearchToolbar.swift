@@ -3,7 +3,7 @@ import JSONViewerCore
 
 public struct SearchToolbar: View {
     @ObservedObject var model: JSONDocumentModel
-    @FocusState private var isSearchFieldFocused: Bool
+    @State private var isSearchFieldFocused: Bool = false
     
     public init(model: JSONDocumentModel) {
         self.model = model
@@ -17,30 +17,37 @@ public struct SearchToolbar: View {
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
             
-            HStack {
+            HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
                     .font(.system(size: 11))
                 
-                TextField("Search keys, values, paths...", text: $model.searchQuery)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .focused($isSearchFieldFocused)
-                    .onSubmit {
-                        model.searchStart()
+                SearchInputTextField(
+                    text: $model.searchQuery,
+                    isFocused: $isSearchFieldFocused,
+                    placeholder: "Search keys, values, paths...",
+                    onEnter: {
+                        model.searchSubmit(reverse: false)
+                    },
+                    onShiftEnter: {
+                        model.searchSubmit(reverse: true)
+                    },
+                    onEscape: {
+                        model.clearSearch()
                     }
+                )
+                .frame(height: 20)
                 
                 if !model.searchQuery.isEmpty {
                     Button(action: {
-                        model.searchQuery = ""
-                        model.searchResults = []
-                        model.searchStatus = ""
+                        model.clearSearch()
                     }) {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.secondary)
                             .font(.system(size: 11))
                     }
                     .buttonStyle(.plain)
+                    .help("Clear search")
                 }
             }
             .padding(.horizontal, 8)
@@ -56,11 +63,11 @@ public struct SearchToolbar: View {
             .frame(minWidth: 180, maxWidth: 300)
             
             Button("GO!") {
-                model.searchStart()
+                model.searchSubmit(reverse: false)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .keyboardShortcut(.defaultAction)
+            .help("Execute search or go to next match (Enter)")
             
             if !model.searchStatus.isEmpty {
                 Text(model.searchStatus)
@@ -89,6 +96,7 @@ public struct SearchToolbar: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(model.searchResults.isEmpty)
+                .help("Previous match (Shift+Enter or Cmd+Shift+G)")
                 .keyboardShortcut("g", modifiers: [.command, .shift])
                 
                 Button(action: {
@@ -102,6 +110,7 @@ public struct SearchToolbar: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(model.searchResults.isEmpty)
+                .help("Next match (Enter or Cmd+G)")
                 .keyboardShortcut("g", modifiers: [.command])
             }
         }
@@ -114,5 +123,148 @@ public struct SearchToolbar: View {
                 .foregroundColor(Color(nsColor: .separatorColor)),
             alignment: .top
         )
+    }
+}
+
+// MARK: - Native AppKit Search Input Text Field
+public struct SearchInputTextField: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    var placeholder: String
+    var onEnter: () -> Void
+    var onShiftEnter: () -> Void
+    var onEscape: () -> Void
+    
+    public init(
+        text: Binding<String>,
+        isFocused: Binding<Bool>,
+        placeholder: String = "Search keys, values, paths...",
+        onEnter: @escaping () -> Void,
+        onShiftEnter: @escaping () -> Void,
+        onEscape: @escaping () -> Void
+    ) {
+        self._text = text
+        self._isFocused = isFocused
+        self.placeholder = placeholder
+        self.onEnter = onEnter
+        self.onShiftEnter = onShiftEnter
+        self.onEscape = onEscape
+    }
+    
+    public func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    public func makeNSView(context: Context) -> NSTextField {
+        let textField = NSTextField()
+        textField.isBordered = false
+        textField.drawsBackground = false
+        textField.focusRingType = .none
+        textField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textField.textColor = NSColor.textColor
+        textField.placeholderString = placeholder
+        textField.maximumNumberOfLines = 1
+        textField.cell?.wraps = false
+        textField.cell?.isScrollable = true
+        textField.cell?.usesSingleLineMode = true
+        textField.stringValue = text
+        textField.delegate = context.coordinator
+        context.coordinator.textField = textField
+        return textField
+    }
+    
+    public func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        if nsView.placeholderString != placeholder {
+            nsView.placeholderString = placeholder
+        }
+    }
+    
+    public static func dismantleNSView(_ nsView: NSTextField, coordinator: Coordinator) {
+        coordinator.cleanup()
+    }
+    
+    public class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: SearchInputTextField
+        weak var textField: NSTextField?
+        private var keyMonitor: Any?
+        
+        init(_ parent: SearchInputTextField) {
+            self.parent = parent
+            super.init()
+            setupKeyMonitor()
+        }
+        
+        private func setupKeyMonitor() {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self = self, let tf = self.textField else { return event }
+                let isEditing = (tf.currentEditor() != nil) || (tf.window?.firstResponder === tf)
+                guard isEditing else { return event }
+                
+                if event.keyCode == 36 || event.keyCode == 76 { // Return / Keypad Enter
+                    let isShift = event.modifierFlags.contains(.shift)
+                    DispatchQueue.main.async {
+                        if isShift {
+                            self.parent.onShiftEnter()
+                        } else {
+                            self.parent.onEnter()
+                        }
+                    }
+                    return nil
+                } else if event.keyCode == 53 { // Escape
+                    DispatchQueue.main.async {
+                        self.parent.onEscape()
+                    }
+                    return nil
+                }
+                return event
+            }
+        }
+        
+        func cleanup() {
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
+            }
+        }
+        
+        deinit {
+            cleanup()
+        }
+        
+        public func controlTextDidChange(_ obj: Notification) {
+            guard let tf = obj.object as? NSTextField else { return }
+            parent.text = tf.stringValue
+        }
+        
+        public func controlTextDidBeginEditing(_ obj: Notification) {
+            DispatchQueue.main.async {
+                self.parent.isFocused = true
+            }
+        }
+        
+        public func controlTextDidEndEditing(_ obj: Notification) {
+            DispatchQueue.main.async {
+                self.parent.isFocused = false
+            }
+        }
+        
+        public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let isShift = NSEvent.modifierFlags.contains(.shift)
+                if isShift {
+                    parent.onShiftEnter()
+                } else {
+                    parent.onEnter()
+                }
+                return true
+            } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onEscape()
+                return true
+            }
+            return false
+        }
     }
 }
