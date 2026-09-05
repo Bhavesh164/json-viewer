@@ -7,7 +7,7 @@
   <br /><br />
   <img src="https://img.shields.io/badge/macOS-13.0%2B-blue?style=flat-square&logo=apple" alt="macOS 13+" />
   <img src="https://img.shields.io/badge/Swift-6.0-orange?style=flat-square&logo=swift" alt="Swift 6" />
-  <img src="https://img.shields.io/badge/Tests-62%20Passed-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-Passing-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/Architecture-Universal%20(ARM%20%2B%20Intel)-purple?style=flat-square" alt="Universal" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
 </p>
@@ -121,7 +121,7 @@ This compiles the release binary, creates the iconset, code-signs the app, insta
 ```
 This builds `build.noindex/JSONViewer.app` and launches it.
 
-### Run Automated Test Suite (54 Tests)
+### Run Automated Test Suite
 ```bash
 swift run JSONViewerTests
 ```
