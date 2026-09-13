@@ -80,12 +80,13 @@ A full-featured code editor with instant syntax feedback and rich serialization 
 
 ---
 
-### 4. Multi-Format Copy & Python Serialization (Viewer Screen)
-Copy your JSON in whatever format you need directly from the Viewer toolbar or Text Editor:
+### 4. Multi-Format Copy & Python Dictionary Serialization
+Copy your JSON in whatever format you need directly from the Viewer toolbar, Text Editor, or context menus:
 - 📋 **Copy Beautified JSON**: Configurable indentation (2-space, 4-space, tabs).
 - ⚡ **Copy Minified JSON**: Single-line compact JSON.
 - 🔤 **Copy as Stringified JSON**: Escaped string literal with quotes (`\"`) and forward slashes (`\/`).
-- 🐍 **Copy as Python Object**: Native Python dictionary/list representation using `True`, `False`, `None`, and single-quoted strings.
+- 🐍 **Copy as Python Dictionary**: Native Python dictionary/list representation using `True`, `False`, `None`, and single-quoted strings.
+- 🔄 **Automatic Python Dictionary to JSON Conversion**: Paste or type any Python dictionary into the editor (`{'key': 'value', 'flag': True, 'empty': None}`) and it is automatically converted into valid, formatted JSON.
 
 ---
 
@@ -152,17 +153,19 @@ swift run JSONViewerTests
 | Shortcut | Action |
 | :--- | :--- |
 | <kbd>?</kbd> or <kbd>⌘</kbd> <kbd>?</kbd> | Show Keyboard Shortcuts Cheatsheet Modal |
+| <kbd>/</kbd> | Focus Search Bar (Quick Jump) |
+| <kbd>⌘</kbd> <kbd>F</kbd> | Find in JSON / Focus Search Bar |
+| <kbd>Enter</kbd> | Find Next Match (in Search Field) |
+| <kbd>⇧</kbd> <kbd>Enter</kbd> | Find Previous Match / Reverse (in Search Field) |
+| <kbd>⌘</kbd> <kbd>G</kbd> | Find Next Match (Global) |
+| <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>G</kbd> | Find Previous Match (Global) |
 | <kbd>⌘</kbd> <kbd>,</kbd> | Open Settings / Preferences Dialog |
 | <kbd>⌘</kbd> <kbd>1</kbd> | Switch to Viewer Tab |
 | <kbd>⌘</kbd> <kbd>2</kbd> | Switch to Text Editor Tab |
 | <kbd>⌘</kbd> <kbd>3</kbd> | Switch to Split View Tab |
 | <kbd>⌘</kbd> <kbd>⌥</kbd> <kbd>P</kbd> | Toggle Properties Panel (Show / Hide) |
 | <kbd>⌘</kbd> <kbd>K</kbd> | Clear Editor |
-| <kbd>⌘</kbd> <kbd>F</kbd> | Focus Search Bar / Find |
-| <kbd>Enter</kbd> | Find Next Match (in Search Field) |
-| <kbd>⇧</kbd> <kbd>Enter</kbd> | Find Previous Match / Reverse (in Search Field) |
-| <kbd>⌘</kbd> <kbd>G</kbd> | Find Next Match |
-| <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>G</kbd> | Find Previous Match |
+| <kbd>⌘</kbd> <kbd>⌥</kbd> <kbd>C</kbd> | Copy as Python Dictionary |
 | <kbd>⌘</kbd> <kbd>E</kbd> | Expand All Tree Nodes |
 | <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>E</kbd> | Collapse All Tree Nodes |
 | <kbd>⌘</kbd> <kbd>+</kbd> | Zoom In Font Size |

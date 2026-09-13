@@ -16,10 +16,19 @@ public final class JSONDocumentModel: ObservableObject {
         didSet {
             isDirty = true
             updateTextMetrics()
+            scheduleLiveParseIfInSplitMode()
         }
     }
     
-    @Published public var activeTab: AppTab = .text
+    @Published public private(set) var treeVersion: Int = 0
+    
+    @Published public var activeTab: AppTab = .text {
+        didSet {
+            if (activeTab == .viewer || activeTab == .split) && (rootNode == nil || isDirty) {
+                _ = parseAndBuildTree(silent: false)
+            }
+        }
+    }
     @Published public var jsonValue: JSONValue?
     @Published public var rootNode: JSONNode?
     @Published public var selectedNode: JSONNode? {
@@ -62,12 +71,18 @@ public final class JSONDocumentModel: ObservableObject {
     
     // Search State
     @Published public var isSearchVisible: Bool = true
+    @Published public var focusSearchFieldTrigger: Int = 0
     @Published public var searchQuery: String = ""
     @Published public var searchResults: [JSONNode] = []
     @Published public var searchResultIds: Set<String> = []
     @Published public var currentSearchIndex: Int = 0
     @Published public var searchStatus: String = ""
     @Published public var lastExecutedSearchQuery: String = ""
+    
+    public func focusSearch() {
+        isSearchVisible = true
+        focusSearchFieldTrigger += 1
+    }
     
     // Sheets & UI Panels
     @Published public var isAboutSheetPresented: Bool = false
@@ -162,12 +177,23 @@ public final class JSONDocumentModel: ObservableObject {
     
     // MARK: - Tab Switching & Validation
     public func selectTab(_ tab: AppTab) {
-        activeTab = tab
         if (tab == .viewer || tab == .split) && (rootNode == nil || isDirty) {
-            DispatchQueue.main.async {
-                _ = self.parseAndBuildTree(silent: false)
-            }
+            _ = self.parseAndBuildTree(silent: false)
         }
+        activeTab = tab
+    }
+    
+    private var splitLiveParseWorkItem: DispatchWorkItem?
+    
+    private func scheduleLiveParseIfInSplitMode() {
+        guard activeTab == .split else { return }
+        splitLiveParseWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.activeTab == .split else { return }
+            _ = self.parseAndBuildTree(silent: true)
+        }
+        splitLiveParseWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
     
     @discardableResult
@@ -181,7 +207,38 @@ public final class JSONDocumentModel: ObservableObject {
         }
         
         do {
-            var parsed = try JSONParser.parse(trimmed)
+            var parsed: JSONValue
+            do {
+                parsed = try JSONParser.parse(trimmed)
+            } catch let initialErr {
+                // 1. If direct parse failed, check if input is a Python dictionary or literal
+                if let pythonParsed = try? PythonLiteralParser.parse(trimmed) {
+                    parsed = pythonParsed
+                    // Automatically convert rawText to standard formatted JSON
+                    self.rawText = pythonParsed.format(
+                        indentSpaces: settings.indentSpaces,
+                        sortKeys: settings.sortKeysAlphabetically,
+                        escapeSlashes: settings.escapeSlashesInStringify
+                    )
+                } else if settings.autoUnwrapStringified {
+                    // 2. Attempt unescape in case of raw stringified JSON
+                    let unescaped = JSONValue.unescapeStringifiedJSON(trimmed)
+                    if unescaped != trimmed, let fallback = try? JSONParser.parse(unescaped) {
+                        parsed = fallback
+                    } else if unescaped != trimmed, let fallbackPython = try? PythonLiteralParser.parse(unescaped) {
+                        parsed = fallbackPython
+                        self.rawText = fallbackPython.format(
+                            indentSpaces: settings.indentSpaces,
+                            sortKeys: settings.sortKeysAlphabetically,
+                            escapeSlashes: settings.escapeSlashesInStringify
+                        )
+                    } else {
+                        throw initialErr
+                    }
+                } else {
+                    throw initialErr
+                }
+            }
             
             // Auto-unwrap stringified JSON if enabled
             if settings.autoUnwrapStringified, case .string(let innerStr) = parsed {
@@ -193,6 +250,7 @@ public final class JSONDocumentModel: ObservableObject {
                 }
             }
             
+            self.treeVersion += 1
             self.jsonValue = parsed
             let root = JSONNode.buildTree(from: parsed, rootKey: "JSON")
             self.rootNode = root
@@ -243,11 +301,20 @@ public final class JSONDocumentModel: ObservableObject {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         do {
-            var val = try JSONParser.parse(trimmed)
+            var val: JSONValue
+            if let direct = try? JSONParser.parse(trimmed) {
+                val = direct
+            } else if let pythonVal = try? PythonLiteralParser.parse(trimmed) {
+                val = pythonVal
+            } else {
+                val = try JSONParser.parse(trimmed)
+            }
             if settings.autoUnwrapStringified, case .string(let s) = val {
                 let sTrim = s.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let unwrap = try? JSONParser.parse(sTrim) {
                     val = unwrap
+                } else if let unwrapPython = try? PythonLiteralParser.parse(sTrim) {
+                    val = unwrapPython
                 }
             }
             self.rawText = val.format(
@@ -258,7 +325,7 @@ public final class JSONDocumentModel: ObservableObject {
             self.parseAndBuildTree(silent: true)
             triggerCopyFeedback("Formatted JSON")
         } catch {
-            showError("Cannot format: Invalid JSON (\(error.localizedDescription))")
+            showError("Cannot format: Invalid JSON or Python Object (\(error.localizedDescription))")
         }
     }
     
@@ -293,6 +360,19 @@ public final class JSONDocumentModel: ObservableObject {
         self.rawText = unescaped
         self.parseAndBuildTree(silent: true)
         triggerCopyFeedback("Unescaped JSON")
+    }
+    
+    public func convertPythonToJson() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            let val = try PythonLiteralParser.parse(trimmed)
+            self.rawText = val.format(indentSpaces: settings.indentSpaces, sortKeys: settings.sortKeysAlphabetically)
+            self.parseAndBuildTree(silent: true)
+            triggerCopyFeedback("Converted Python Dictionary to JSON!")
+        } catch {
+            showError("Cannot convert: Invalid Python dictionary syntax (\(error.localizedDescription))")
+        }
     }
     
     // MARK: - Clipboard Operations
@@ -344,10 +424,10 @@ public final class JSONDocumentModel: ObservableObject {
     
     public func copyPythonObject() {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let val = jsonValue ?? (try? JSONParser.parse(trimmed)) {
+        if let val = jsonValue ?? (try? JSONParser.parse(trimmed)) ?? (try? PythonLiteralParser.parse(trimmed)) {
             let text = val.toPythonObject(indentSpaces: settings.indentSpaces < 0 ? 4 : settings.indentSpaces)
             copyToClipboard(text)
-            triggerCopyFeedback("Copied Python Object!")
+            triggerCopyFeedback("Copied Python Dictionary!")
         } else {
             copyToClipboard(rawText)
             triggerCopyFeedback("Copied Text!")
@@ -372,6 +452,16 @@ public final class JSONDocumentModel: ObservableObject {
     public func pasteText() {
         let pasteboard = NSPasteboard.general
         if let string = pasteboard.string(forType: .string) {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Auto-convert Python dictionary to JSON on paste if not already standard JSON
+            if (trimmed.hasPrefix("{") || trimmed.hasPrefix("[")) && (try? JSONParser.parse(trimmed)) == nil {
+                if let pythonVal = try? PythonLiteralParser.parse(trimmed) {
+                    rawText = pythonVal.format(indentSpaces: settings.indentSpaces, sortKeys: settings.sortKeysAlphabetically)
+                    parseAndBuildTree(silent: true)
+                    triggerCopyFeedback("Converted Python Dictionary to JSON!")
+                    return
+                }
+            }
             rawText = string
         }
     }
@@ -564,10 +654,11 @@ public final class JSONDocumentModel: ObservableObject {
             return
         }
         
+        let version = self.treeVersion
         var rows: [FlatTreeRow] = []
         func traverse(node: JSONNode, depth: Int) {
             let isExp = expandedNodeIds.contains(node.id)
-            rows.append(FlatTreeRow(node: node, depth: depth, isExpanded: isExp))
+            rows.append(FlatTreeRow(node: node, depth: depth, isExpanded: isExp, treeVersion: version))
             if isExp, let children = node.children {
                 for child in children {
                     traverse(node: child, depth: depth + 1)

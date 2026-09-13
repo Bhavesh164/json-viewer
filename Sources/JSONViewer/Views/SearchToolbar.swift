@@ -25,6 +25,7 @@ public struct SearchToolbar: View {
                 SearchInputTextField(
                     text: $model.searchQuery,
                     isFocused: $isSearchFieldFocused,
+                    focusTrigger: model.focusSearchFieldTrigger,
                     placeholder: "Search keys, values, paths...",
                     onEnter: {
                         model.searchSubmit(reverse: false)
@@ -130,6 +131,7 @@ public struct SearchToolbar: View {
 public struct SearchInputTextField: NSViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
+    var focusTrigger: Int = 0
     var placeholder: String
     var onEnter: () -> Void
     var onShiftEnter: () -> Void
@@ -138,6 +140,7 @@ public struct SearchInputTextField: NSViewRepresentable {
     public init(
         text: Binding<String>,
         isFocused: Binding<Bool>,
+        focusTrigger: Int = 0,
         placeholder: String = "Search keys, values, paths...",
         onEnter: @escaping () -> Void,
         onShiftEnter: @escaping () -> Void,
@@ -145,6 +148,7 @@ public struct SearchInputTextField: NSViewRepresentable {
     ) {
         self._text = text
         self._isFocused = isFocused
+        self.focusTrigger = focusTrigger
         self.placeholder = placeholder
         self.onEnter = onEnter
         self.onShiftEnter = onShiftEnter
@@ -170,15 +174,28 @@ public struct SearchInputTextField: NSViewRepresentable {
         textField.stringValue = text
         textField.delegate = context.coordinator
         context.coordinator.textField = textField
+        
+        DispatchQueue.main.async {
+            textField.window?.makeFirstResponder(textField)
+            textField.selectText(nil)
+        }
         return textField
     }
     
     public func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
         if nsView.stringValue != text {
             nsView.stringValue = text
         }
         if nsView.placeholderString != placeholder {
             nsView.placeholderString = placeholder
+        }
+        if context.coordinator.lastFocusTrigger != focusTrigger {
+            context.coordinator.lastFocusTrigger = focusTrigger
+            DispatchQueue.main.async {
+                nsView.window?.makeFirstResponder(nsView)
+                nsView.selectText(nil)
+            }
         }
     }
     
@@ -189,6 +206,7 @@ public struct SearchInputTextField: NSViewRepresentable {
     public class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: SearchInputTextField
         weak var textField: NSTextField?
+        var lastFocusTrigger: Int = 0
         private var keyMonitor: Any?
         
         init(_ parent: SearchInputTextField) {
@@ -215,7 +233,12 @@ public struct SearchInputTextField: NSViewRepresentable {
                     return nil
                 } else if event.keyCode == 53 { // Escape
                     DispatchQueue.main.async {
-                        self.parent.onEscape()
+                        if !self.parent.text.isEmpty {
+                            self.parent.text = ""
+                            self.parent.onEscape()
+                        } else {
+                            NotificationCenter.default.post(name: .closeSearchRequested, object: nil)
+                        }
                     }
                     return nil
                 }

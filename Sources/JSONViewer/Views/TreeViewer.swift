@@ -44,7 +44,7 @@ public struct TreeViewer: View {
                         Label("Copy as Stringified JSON", systemImage: "quote.bubble")
                     }
                     Button(action: { model.copyPythonObject() }) {
-                        Label("Copy as Python Object", systemImage: "curlybraces.square")
+                        Label("Copy as Python Dictionary", systemImage: "curlybraces.square")
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -56,7 +56,7 @@ public struct TreeViewer: View {
                 }
                 .menuStyle(.borderedButton)
                 .controlSize(.small)
-                .help("Click to copy beautified JSON, or open dropdown to copy minified, stringified, or Python object")
+                .help("Click to copy beautified JSON, or open dropdown to copy minified, stringified, or Python dictionary")
                 
                 Divider()
                     .frame(height: 14)
@@ -98,16 +98,7 @@ public struct TreeViewer: View {
                         ScrollView([.vertical, .horizontal]) {
                             LazyVStack(alignment: .leading, spacing: 1) {
                                 ForEach(model.visibleTreeRows) { row in
-                                    FlatTreeNodeRow(
-                                        row: row,
-                                        isSelected: model.selectedNode?.id == row.node.id,
-                                        isMatch: model.searchResultIds.contains(row.node.id),
-                                        isLeafExpanded: model.expandedLeafNodeIds.contains(row.node.id),
-                                        fontSize: model.fontSize,
-                                        viewportWidth: geo.size.width,
-                                        model: model
-                                    )
-                                    .equatable()
+                                    makeTreeRow(row, viewportWidth: geo.size.width)
                                 }
                             }
                             .padding(.vertical, 4)
@@ -119,7 +110,7 @@ public struct TreeViewer: View {
                         .onChange(of: model.selectedNode?.id) { selectedId in
                             if let selectedId = selectedId {
                                 withAnimation(.easeInOut(duration: 0.15)) {
-                                    proxy.scrollTo(selectedId, anchor: .center)
+                                    proxy.scrollTo("\(model.treeVersion):\(selectedId)", anchor: .center)
                                 }
                             }
                         }
@@ -144,6 +135,29 @@ public struct TreeViewer: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onAppear {
+            if model.rootNode == nil || model.isDirty {
+                model.parseAndBuildTree(silent: true)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func makeTreeRow(_ row: FlatTreeRow, viewportWidth: CGFloat) -> some View {
+        let isSelected = model.selectedNode?.id == row.node.id
+        let isMatch = model.searchResultIds.contains(row.node.id)
+        let isLeafExpanded = model.expandedLeafNodeIds.contains(row.node.id)
+        FlatTreeNodeRow(
+            row: row,
+            isSelected: isSelected,
+            isMatch: isMatch,
+            isLeafExpanded: isLeafExpanded,
+            fontSize: model.fontSize,
+            viewportWidth: viewportWidth,
+            model: model
+        )
+        .equatable()
+        .id(row.id)
     }
 }
 
@@ -160,7 +174,10 @@ struct FlatTreeNodeRow: View, Equatable {
     @UIState private var isCopied: Bool = false
     
     static func == (lhs: FlatTreeNodeRow, rhs: FlatTreeNodeRow) -> Bool {
+        lhs.row.treeVersion == rhs.row.treeVersion &&
         lhs.row.node.id == rhs.row.node.id &&
+        lhs.row.node.key == rhs.row.node.key &&
+        lhs.row.node.value == rhs.row.node.value &&
         lhs.row.depth == rhs.row.depth &&
         lhs.row.isExpanded == rhs.row.isExpanded &&
         lhs.isSelected == rhs.isSelected &&
@@ -452,6 +469,9 @@ struct FlatTreeNodeRow: View, Equatable {
             }
             Button("Copy Subtree as JSON") {
                 copyToClipboard(row.node.value.format(indentSpaces: 2))
+            }
+            Button("Copy as Python Dictionary") {
+                copyToClipboard(row.node.value.toPythonObject(indentSpaces: 4))
             }
         }
     }

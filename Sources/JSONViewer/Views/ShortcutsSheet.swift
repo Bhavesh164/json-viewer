@@ -33,17 +33,19 @@ public struct ShortcutsSheet: View {
         ShortcutItem(category: "Editor & Formatting", title: "Clear Editor", keys: ["⌘", "K"]),
         ShortcutItem(category: "Editor & Formatting", title: "Open JSON File", keys: ["⌘", "O"]),
         ShortcutItem(category: "Editor & Formatting", title: "Save JSON File", keys: ["⌘", "S"]),
+        ShortcutItem(category: "Editor & Formatting", title: "Copy as Python Dictionary", keys: ["⌘", "⌥", "C"]),
         ShortcutItem(category: "Editor & Formatting", title: "Zoom In Font Size", keys: ["⌘", "+"]),
         ShortcutItem(category: "Editor & Formatting", title: "Zoom Out Font Size", keys: ["⌘", "-"]),
         ShortcutItem(category: "Editor & Formatting", title: "Reset Zoom / Font Size", keys: ["⌘", "0"]),
         
         // Search
-        ShortcutItem(category: "Search & Navigation", title: "Toggle / Focus Search Bar", keys: ["⌘", "F"]),
+        ShortcutItem(category: "Search & Navigation", title: "Focus Search Bar (quick)", keys: ["/"]),
+        ShortcutItem(category: "Search & Navigation", title: "Find in JSON / Focus Search", keys: ["⌘", "F"]),
         ShortcutItem(category: "Search & Navigation", title: "Find Next Match (in search)", keys: ["Enter"]),
         ShortcutItem(category: "Search & Navigation", title: "Find Previous Match (in search)", keys: ["⇧", "Enter"]),
         ShortcutItem(category: "Search & Navigation", title: "Find Next Match (global)", keys: ["⌘", "G"]),
         ShortcutItem(category: "Search & Navigation", title: "Find Previous Match (global)", keys: ["⌘", "⇧", "G"]),
-        ShortcutItem(category: "Search & Navigation", title: "Dismiss / Close Modal", keys: ["Esc"])
+        ShortcutItem(category: "Search & Navigation", title: "Dismiss / Close Modal / Search", keys: ["Esc"])
     ]
     
     private var filteredCategories: [String] {

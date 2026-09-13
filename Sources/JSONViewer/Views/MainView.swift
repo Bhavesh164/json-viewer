@@ -16,7 +16,8 @@ public struct MainView: View {
                 Text(model.errorMessage)
             }
             .modifier(MainSheetsModifier(model: model))
-            .modifier(MainNotificationsModifier(model: model))
+            .modifier(ViewControlsNotificationModifier(model: model))
+            .modifier(SearchAndFileNotificationModifier(model: model))
     }
     
     @ViewBuilder
@@ -57,11 +58,15 @@ public struct MainView: View {
             .help(model.isPropertiesVisible ? "Hide Properties Panel (Cmd+Option+P)" : "Show Properties Panel (Cmd+Option+P)")
             
             Button(action: {
-                model.isSearchVisible.toggle()
+                if model.isSearchVisible {
+                    model.isSearchVisible = false
+                } else {
+                    model.focusSearch()
+                }
             }) {
                 Label("Find", systemImage: "magnifyingglass")
             }
-            .help("Toggle Search Bar (Cmd+F)")
+            .help("Toggle & Focus Search Bar (/ or Cmd+F)")
             
             Button(action: {
                 model.isShortcutsSheetPresented = true
@@ -144,8 +149,8 @@ struct MainSheetsModifier: ViewModifier {
     }
 }
 
-// MARK: - Notifications Modifier
-struct MainNotificationsModifier: ViewModifier {
+// MARK: - View Controls Notifications Modifier
+struct ViewControlsNotificationModifier: ViewModifier {
     @ObservedObject var model: JSONDocumentModel
     
     func body(content: Content) -> some View {
@@ -189,5 +194,61 @@ struct MainNotificationsModifier: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .resetZoomRequested)) { _ in
                 model.resetZoom()
             }
+    }
+}
+
+// MARK: - Search & File Notifications Modifier
+struct SearchAndFileNotificationModifier: ViewModifier {
+    @ObservedObject var model: JSONDocumentModel
+    
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .focusSearchRequested)) { _ in
+                if model.activeTab == .text {
+                    model.selectTab(.split)
+                }
+                model.focusSearch()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .closeSearchRequested)) { _ in
+                model.isSearchVisible = false
+                NSApp.keyWindow?.makeFirstResponder(nil)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findNextRequested)) { _ in
+                model.searchNext()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findPreviousRequested)) { _ in
+                model.searchPrevious()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openFileRequested)) { _ in
+                promptOpenFile(model: model)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .saveFileRequested)) { _ in
+                promptSaveFile(model: model)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .copyPythonObjectRequested)) { _ in
+                model.copyPythonObject()
+            }
+    }
+}
+
+// MARK: - Global File Open / Save Dialog Helpers
+@MainActor
+func promptOpenFile(model: JSONDocumentModel) {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.json, .plainText]
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    if panel.runModal() == .OK, let url = panel.url {
+        model.openFile(url: url)
+    }
+}
+
+@MainActor
+func promptSaveFile(model: JSONDocumentModel) {
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [.json]
+    panel.nameFieldStringValue = "document.json"
+    if panel.runModal() == .OK, let url = panel.url {
+        model.saveToFile(url: url)
     }
 }

@@ -189,17 +189,19 @@ public final class JSONNode: Identifiable, ObservableObject, @unchecked Sendable
 }
 
 public struct FlatTreeRow: Identifiable, @unchecked Sendable {
-    public var id: String { node.id }
+    public var id: String { "\(treeVersion):\(node.id)" }
     public let node: JSONNode
     public let depth: Int
     public let isExpanded: Bool
     public let isContainer: Bool
+    public let treeVersion: Int
     
-    public init(node: JSONNode, depth: Int, isExpanded: Bool) {
+    public init(node: JSONNode, depth: Int, isExpanded: Bool, treeVersion: Int = 0) {
         self.node = node
         self.depth = depth
         self.isExpanded = isExpanded
         self.isContainer = node.isContainer
+        self.treeVersion = treeVersion
     }
 }
 

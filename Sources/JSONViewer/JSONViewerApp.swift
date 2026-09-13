@@ -27,6 +27,43 @@ struct JSONViewerApp: App {
                 .keyboardShortcut(",", modifiers: [.command])
             }
             
+            CommandGroup(replacing: .newItem) {
+                Button("Open JSON File...") {
+                    NotificationCenter.default.post(name: .openFileRequested, object: nil)
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+                
+                Button("Save JSON File...") {
+                    NotificationCenter.default.post(name: .saveFileRequested, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+            }
+            
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("Copy as Python Dictionary") {
+                    NotificationCenter.default.post(name: .copyPythonObjectRequested, object: nil)
+                }
+                .keyboardShortcut("c", modifiers: [.command, .option])
+            }
+            
+            CommandMenu("Find") {
+                Button("Find in JSON...") {
+                    NotificationCenter.default.post(name: .focusSearchRequested, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: [.command])
+                
+                Button("Find Next") {
+                    NotificationCenter.default.post(name: .findNextRequested, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: [.command])
+                
+                Button("Find Previous") {
+                    NotificationCenter.default.post(name: .findPreviousRequested, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+            }
+            
             CommandMenu("JSON") {
                 Button("Clear Editor") {
                     NotificationCenter.default.post(name: .clearRequested, object: nil)
@@ -118,7 +155,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         
-        // Monitor key down for '?' shortcut
+        // Monitor key down for '?' and '/' shortcuts
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if event.characters == "?" {
                 // If Command modifier is pressed (Cmd+?), always trigger shortcuts
@@ -136,6 +173,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 // Otherwise trigger keyboard shortcuts cheatsheet!
                 NotificationCenter.default.post(name: .shortcutsRequested, object: nil)
+                return nil
+            } else if event.characters == "/" {
+                // If focus is in an editable text field/editor, let '/' type normally!
+                if let responder = NSApp.keyWindow?.firstResponder {
+                    if responder is NSTextView || responder is NSTextField {
+                        return event
+                    }
+                }
+                
+                // Otherwise trigger search bar focus!
+                NotificationCenter.default.post(name: .focusSearchRequested, object: nil)
                 return nil
             }
             return event
@@ -157,6 +205,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     static let togglePropertiesRequested = Notification.Name("togglePropertiesRequested")
     static let clearRequested = Notification.Name("clearRequested")
+    static let expandAllNodesRequested = Notification.Name("expandAllNodesRequested")
     static let expandAllRequested = Notification.Name("expandAllRequested")
     static let collapseAllRequested = Notification.Name("collapseAllRequested")
     static let aboutRequested = Notification.Name("aboutRequested")
@@ -168,4 +217,11 @@ extension Notification.Name {
     static let selectTabViewerRequested = Notification.Name("selectTabViewerRequested")
     static let selectTabTextRequested = Notification.Name("selectTabTextRequested")
     static let selectTabSplitRequested = Notification.Name("selectTabSplitRequested")
+    static let focusSearchRequested = Notification.Name("focusSearchRequested")
+    static let closeSearchRequested = Notification.Name("closeSearchRequested")
+    static let findNextRequested = Notification.Name("findNextRequested")
+    static let findPreviousRequested = Notification.Name("findPreviousRequested")
+    static let openFileRequested = Notification.Name("openFileRequested")
+    static let saveFileRequested = Notification.Name("saveFileRequested")
+    static let copyPythonObjectRequested = Notification.Name("copyPythonObjectRequested")
 }

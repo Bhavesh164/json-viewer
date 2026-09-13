@@ -586,6 +586,141 @@ do {
     assertTest(model.parseError == nil, "Model has no parse error after unescape")
 }
 
+// 21. Test First-Time Tab Switch Reflection Bugfix (selectTab synchronously parses dirty input)
+do {
+    let model = JSONDocumentModel()
+    let initialVersion = model.treeVersion
+    model.rawText = "{\"title\": \"Original Title\", \"count\": 1}"
+    model.selectTab(.viewer)
+    
+    assertTest(model.activeTab == .viewer, "Active tab is viewer")
+    assertTest(model.rootNode != nil, "Root node exists")
+    assertTest(model.treeVersion == initialVersion + 1, "Tree version incremented after parsing initial text")
+    let originalTitleRow = model.visibleTreeRows.first(where: { $0.node.key == "title" })
+    assertTest(originalTitleRow?.node.value == .string("Original Title"), "Original title is parsed")
+    assertTest(originalTitleRow?.id == "\(initialVersion + 1):$.title", "Row id contains treeVersion")
+    
+    // Switch to Text tab and edit input
+    model.selectTab(.text)
+    assertTest(model.activeTab == .text, "Switched to text tab")
+    model.rawText = "{\"title\": \"Updated Title\", \"count\": 2, \"newField\": true}"
+    assertTest(model.isDirty == true, "Model is dirty after text change")
+    
+    // Switch to Viewer tab on FIRST ATTEMPT
+    model.selectTab(.viewer)
+    
+    // Changes MUST be reflected immediately on first switch, without needing a second switch!
+    assertTest(model.activeTab == .viewer, "Active tab is viewer on first switch")
+    assertTest(model.isDirty == false, "Model is not dirty after first switch to viewer")
+    assertTest(model.treeVersion == initialVersion + 2, "Tree version incremented on first switch")
+    let updatedTitleRow = model.visibleTreeRows.first(where: { $0.node.key == "title" })
+    assertTest(updatedTitleRow?.node.value == .string("Updated Title"), "Updated title reflected on FIRST switch")
+    assertTest(updatedTitleRow?.id == "\(initialVersion + 2):$.title", "Row id contains new treeVersion")
+    
+    let newFieldRow = model.visibleTreeRows.first(where: { $0.node.key == "newField" })
+    assertTest(newFieldRow?.node.value == .bool(true), "New field reflected on FIRST switch")
+    
+    // Test third modification
+    model.selectTab(.text)
+    model.rawText = "{\"title\": \"Third Version\"}"
+    model.selectTab(.viewer)
+    assertTest(model.treeVersion == initialVersion + 3, "Tree version incremented to third version")
+    let thirdTitleRow = model.visibleTreeRows.first(where: { $0.node.key == "title" })
+    assertTest(thirdTitleRow?.node.value == .string("Third Version"), "Third version reflected on first switch")
+}
+
+// 22. Test activeTab.didSet Direct Assignment
+do {
+    let model = JSONDocumentModel()
+    let initialVersion = model.treeVersion
+    model.rawText = "{\"status\": \"idle\"}"
+    model.activeTab = .viewer
+    assertTest(model.treeVersion == initialVersion + 1, "Direct activeTab assignment parsed tree")
+    let statusRow = model.visibleTreeRows.first(where: { $0.node.key == "status" })
+    assertTest(statusRow?.node.value == .string("idle"), "Status row contains idle")
+    
+    model.activeTab = .text
+    model.rawText = "{\"status\": \"active\"}"
+    assertTest(model.isDirty == true, "Model is dirty")
+    model.activeTab = .viewer
+    assertTest(model.treeVersion == initialVersion + 2, "Direct activeTab assignment parsed new treeVersion")
+    let updatedStatusRow = model.visibleTreeRows.first(where: { $0.node.key == "status" })
+    assertTest(updatedStatusRow?.node.value == .string("active"), "Status row reflects active on direct switch")
+}
+
+// 23. Test PythonLiteralParser
+do {
+    let pythonCode = """
+    # Python dictionary with comments and trailing commas
+    {
+        'app_name': 'JSONViewer',
+        'is_active': True,
+        'is_guest': False,
+        'cache': None,
+        'ports': (8080, 8443,),
+        'limits': {
+            'max_mb': 100,
+            'timeout_sec': 30,
+        },
+    }
+    """
+    do {
+        let val = try PythonLiteralParser.parse(pythonCode)
+        if case .object(let props) = val {
+            assertTest(props.count == 6, "Python dict parsed into 6 properties")
+            assertTest(props.first(where: { $0.key == "app_name" })?.value == .string("JSONViewer"), "app_name string parsed")
+            assertTest(props.first(where: { $0.key == "is_active" })?.value == .bool(true), "True parsed as true")
+            assertTest(props.first(where: { $0.key == "is_guest" })?.value == .bool(false), "False parsed as false")
+            assertTest(props.first(where: { $0.key == "cache" })?.value == .null, "None parsed as null")
+            assertTest(props.first(where: { $0.key == "ports" })?.value == .array([.number(8080, raw: "8080"), .number(8443, raw: "8443")]), "Tuple parsed as array")
+        } else {
+            assertTest(false, "Expected object from Python dict")
+        }
+    } catch {
+        assertTest(false, "Failed to parse Python literal: \(error)")
+    }
+}
+
+// 24. Test Python Dictionary Auto-Conversion to JSON in Model
+do {
+    let model = JSONDocumentModel()
+    let pythonInput = "{'service': 'auth', 'enabled': True, 'tokens': None}"
+    model.rawText = pythonInput
+    
+    // Test parseAndBuildTree auto-converts rawText to valid JSON
+    let success = model.parseAndBuildTree(silent: false)
+    assertTest(success == true, "parseAndBuildTree succeeded on Python dict input")
+    assertTest(model.rawText.contains("\"service\": \"auth\""), "rawText auto-converted to double quotes")
+    assertTest(model.rawText.contains("\"enabled\": true"), "rawText auto-converted True to true")
+    assertTest(model.rawText.contains("\"tokens\": null"), "rawText auto-converted None to null")
+    assertTest(model.parseError == nil, "No parse error after auto-conversion")
+    
+    // Test beautifyText auto-converts Python dict
+    model.rawText = "{'debug': False, 'workers': 4}"
+    model.beautifyText()
+    assertTest(model.rawText.contains("\"debug\": false"), "beautifyText auto-converts Python dict to JSON")
+    
+    // Test convertPythonToJson
+    model.rawText = "{'env': 'production', 'retries': 3}"
+    model.convertPythonToJson()
+    assertTest(model.rawText.contains("\"env\": \"production\""), "convertPythonToJson converts to JSON")
+    
+    // Test copyPythonObject
+    model.copyPythonObject()
+    assertTest(model.copiedToastMessage == "Copied Python Dictionary!", "Toast displays Copied Python Dictionary!")
+}
+
+// 25. Test Search Bar Focus Trigger
+do {
+    let model = JSONDocumentModel()
+    assertTest(model.focusSearchFieldTrigger == 0, "Initial search focus trigger is 0")
+    model.focusSearch()
+    assertTest(model.isSearchVisible == true, "isSearchVisible is true after focusSearch()")
+    assertTest(model.focusSearchFieldTrigger == 1, "focusSearchFieldTrigger incremented to 1")
+    model.focusSearch()
+    assertTest(model.focusSearchFieldTrigger == 2, "focusSearchFieldTrigger incremented to 2 on second call")
+}
+
 print("\n-----------------------------------------")
 print("Total Tests: \(totalTests)")
 print("Passed:      \(passedTests)")

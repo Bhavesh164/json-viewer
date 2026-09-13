@@ -33,7 +33,7 @@ public struct TextEditorView: View {
                         Label("Copy as Stringified JSON", systemImage: "quote.bubble")
                     }
                     Button(action: { model.copyPythonObject() }) {
-                        Label("Copy as Python Object", systemImage: "curlybraces.square")
+                        Label("Copy as Python Dictionary", systemImage: "curlybraces.square")
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -45,7 +45,7 @@ public struct TextEditorView: View {
                 }
                 .menuStyle(.borderedButton)
                 .controlSize(.small)
-                .help("Click to copy text, or open dropdown to copy formatted, minified, stringified, or Python object")
+                .help("Click to copy text, or open dropdown to copy formatted, minified, stringified, or Python dictionary")
                 
                 Button(action: {
                     model.clearText()
@@ -94,6 +94,15 @@ public struct TextEditorView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("Unescape stringified JSON or escaped slashes/characters back to formatted JSON")
+                
+                Button(action: {
+                    model.convertPythonToJson()
+                }) {
+                    Label("Python → JSON", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Convert Python dictionary or object literal in editor directly to standard JSON")
                 
                 Spacer()
                 
@@ -208,22 +217,28 @@ public struct TextEditorView: View {
     }
     
     private func promptOpenFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json, .plainText]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let url = panel.url {
-            model.openFile(url: url)
-        }
+        JSONViewer.promptOpenFile(model: model)
     }
     
     private func promptSaveFile() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "document.json"
-        if panel.runModal() == .OK, let url = panel.url {
-            model.saveToFile(url: url)
+        JSONViewer.promptSaveFile(model: model)
+    }
+}
+
+// Custom NSTextView that automatically converts pasted Python dictionaries/literals to valid JSON
+final class EditorTextView: NSTextView {
+    override func paste(_ sender: Any?) {
+        if let pbString = NSPasteboard.general.string(forType: .string) {
+            let trimmed = pbString.trimmingCharacters(in: .whitespacesAndNewlines)
+            if (trimmed.hasPrefix("{") || trimmed.hasPrefix("[")) && (try? JSONParser.parse(trimmed)) == nil {
+                if let pythonVal = try? PythonLiteralParser.parse(trimmed) {
+                    let formattedJSON = pythonVal.format(indentSpaces: 2, sortKeys: false)
+                    self.insertText(formattedJSON, replacementRange: self.selectedRange())
+                    return
+                }
+            }
         }
+        super.paste(sender)
     }
 }
 
@@ -243,7 +258,7 @@ struct NativeCodeEditor: NSViewRepresentable {
         scrollView.hasHorizontalScroller = true
         scrollView.borderType = .noBorder
         
-        let textView = NSTextView()
+        let textView = EditorTextView()
         textView.autoresizingMask = [.width]
         textView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.backgroundColor = NSColor.textBackgroundColor
@@ -284,6 +299,7 @@ struct NativeCodeEditor: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
         guard let textView = nsView.documentView as? NSTextView else { return }
         
         if textView.font?.pointSize != fontSize {
