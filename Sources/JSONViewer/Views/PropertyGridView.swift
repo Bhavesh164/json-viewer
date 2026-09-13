@@ -4,9 +4,9 @@ import JSONViewerCore
 
 public struct PropertyGridView: View {
     @ObservedObject var model: JSONDocumentModel
-    @State private var filterQuery: String = ""
-    @State private var copiedRowId: Int?
-    @State private var displayLimit: Int = 500
+    @UIState private var filterQuery: String = ""
+    @UIState private var copiedRowId: Int?
+    @UIState private var displayLimit: Int = 500
     
     public init(model: JSONDocumentModel) {
         self.model = model
@@ -221,9 +221,9 @@ struct PropertyRowView: View {
     let fontSize: CGFloat
     let isCopied: Bool
     var onSelect: (() -> Void)? = nil
-    @State private var isNameHovered: Bool = false
-    @State private var isRowHovered: Bool = false
-    @State private var isExpandedValue: Bool = false
+    @UIState private var isNameHovered: Bool = false
+    @UIState private var isRowHovered: Bool = false
+    @UIState private var isExpandedValue: Bool = false
     
     private var isBigValue: Bool {
         row.value.count > 35 || row.value.contains("\n")

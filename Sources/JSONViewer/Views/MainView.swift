@@ -7,8 +7,21 @@ public struct MainView: View {
     public init() {}
     
     public var body: some View {
+        mainContent
+            .frame(minWidth: 800, minHeight: 540)
+            .toolbar { toolbarContent }
+            .alert("JSON error", isPresented: $model.isErrorAlertPresented) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(model.errorMessage)
+            }
+            .modifier(MainSheetsModifier(model: model))
+            .modifier(MainNotificationsModifier(model: model))
+    }
+    
+    @ViewBuilder
+    private var mainContent: some View {
         VStack(spacing: 0) {
-            // Main Content depending on active tab
             switch model.activeTab {
             case .viewer:
                 viewerContentView
@@ -18,68 +31,51 @@ public struct MainView: View {
                 splitContentView
             }
         }
-        .frame(minWidth: 800, minHeight: 540)
-        .toolbar {
-            ToolbarItemGroup(placement: .principal) {
-                Picker("Tab", selection: Binding(
-                    get: { model.activeTab },
-                    set: { newTab in model.selectTab(newTab) }
-                )) {
-                    Text("Viewer").tag(AppTab.viewer)
-                    Text("Text").tag(AppTab.text)
-                    Text("Split").tag(AppTab.split)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 240)
+    }
+    
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItemGroup(placement: .principal) {
+            Picker("Tab", selection: Binding(
+                get: { model.activeTab },
+                set: { newTab in model.selectTab(newTab) }
+            )) {
+                Text("Viewer").tag(AppTab.viewer)
+                Text("Text").tag(AppTab.text)
+                Text("Split").tag(AppTab.split)
             }
+            .pickerStyle(.segmented)
+            .frame(width: 240)
+        }
+        
+        ToolbarItemGroup(placement: .automatic) {
+            Button(action: {
+                model.toggleProperties()
+            }) {
+                Label(model.isPropertiesVisible ? "Hide Properties" : "Show Properties", systemImage: "sidebar.trailing")
+            }
+            .help(model.isPropertiesVisible ? "Hide Properties Panel (Cmd+Option+P)" : "Show Properties Panel (Cmd+Option+P)")
             
-            ToolbarItemGroup(placement: .automatic) {
-                Button(action: {
-                    model.toggleProperties()
-                }) {
-                    Label(model.isPropertiesVisible ? "Hide Properties" : "Show Properties", systemImage: "sidebar.trailing")
-                }
-                .help(model.isPropertiesVisible ? "Hide Properties Panel (Cmd+Option+P)" : "Show Properties Panel (Cmd+Option+P)")
-                
-                Button(action: {
-                    model.isSearchVisible.toggle()
-                }) {
-                    Label("Find", systemImage: "magnifyingglass")
-                }
-                .help("Toggle Search Bar (Cmd+F)")
+            Button(action: {
+                model.isSearchVisible.toggle()
+            }) {
+                Label("Find", systemImage: "magnifyingglass")
             }
-        }
-        .alert("JSON error", isPresented: $model.isErrorAlertPresented) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(model.errorMessage)
-        }
-        .sheet(isPresented: $model.isAboutSheetPresented) {
-            AboutSheet()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .togglePropertiesRequested)) { _ in
-            model.toggleProperties()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .clearRequested)) { _ in
-            model.clearText()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .expandAllRequested)) { _ in
-            model.expandAll()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .collapseAllRequested)) { _ in
-            model.collapseAll()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .aboutRequested)) { _ in
-            model.isAboutSheetPresented = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .zoomInRequested)) { _ in
-            model.zoomIn()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .zoomOutRequested)) { _ in
-            model.zoomOut()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .resetZoomRequested)) { _ in
-            model.resetZoom()
+            .help("Toggle Search Bar (Cmd+F)")
+            
+            Button(action: {
+                model.isShortcutsSheetPresented = true
+            }) {
+                Label("Shortcuts", systemImage: "questionmark.circle")
+            }
+            .help("Keyboard Shortcuts (?)")
+            
+            Button(action: {
+                model.isSettingsSheetPresented = true
+            }) {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .help("Settings (Cmd+,)")
         }
     }
     
@@ -125,5 +121,73 @@ public struct MainView: View {
             }
             .frame(minWidth: 500, maxWidth: .infinity)
         }
+    }
+}
+
+// MARK: - Sheets Modifier
+struct MainSheetsModifier: ViewModifier {
+    @ObservedObject var model: JSONDocumentModel
+    
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $model.isAboutSheetPresented) {
+                AboutSheet()
+            }
+            .sheet(isPresented: $model.isShortcutsSheetPresented) {
+                ShortcutsSheet()
+            }
+            .sheet(isPresented: $model.isSettingsSheetPresented) {
+                SettingsView(settings: model.settings, onShowShortcuts: {
+                    model.isShortcutsSheetPresented = true
+                })
+            }
+    }
+}
+
+// MARK: - Notifications Modifier
+struct MainNotificationsModifier: ViewModifier {
+    @ObservedObject var model: JSONDocumentModel
+    
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .togglePropertiesRequested)) { _ in
+                model.toggleProperties()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .clearRequested)) { _ in
+                model.clearText()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .expandAllRequested)) { _ in
+                model.expandAll()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .collapseAllRequested)) { _ in
+                model.collapseAll()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .aboutRequested)) { _ in
+                model.isAboutSheetPresented = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .shortcutsRequested)) { _ in
+                model.isShortcutsSheetPresented.toggle()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .settingsRequested)) { _ in
+                model.isSettingsSheetPresented = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .selectTabViewerRequested)) { _ in
+                model.selectTab(.viewer)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .selectTabTextRequested)) { _ in
+                model.selectTab(.text)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .selectTabSplitRequested)) { _ in
+                model.selectTab(.split)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .zoomInRequested)) { _ in
+                model.zoomIn()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .zoomOutRequested)) { _ in
+                model.zoomOut()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .resetZoomRequested)) { _ in
+                model.resetZoom()
+            }
     }
 }

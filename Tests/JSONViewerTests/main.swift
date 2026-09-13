@@ -453,6 +453,139 @@ if FileManager.default.fileExists(atPath: "edge_5mb.json") {
     }
 }
 
+// 15. Test Stringify with forward slash escaping (\/) and quote escaping (\")
+do {
+    let json = """
+    {
+      "api": "/v1/users",
+      "website": "https://example.com/test",
+      "message": "hello \\"world\\""
+    }
+    """
+    let val = try JSONParser.parse(json)
+    
+    // Test with slash escaping enabled (default for stringify)
+    let stringifiedWithSlashes = val.stringify(escapeSlashes: true)
+    assertTest(stringifiedWithSlashes.hasPrefix("\"") && stringifiedWithSlashes.hasSuffix("\""), "Stringified JSON starts and ends with quotes")
+    assertTest(stringifiedWithSlashes.contains("\\/v1\\/users"), "Forward slashes are escaped as \\/ when escapeSlashes: true")
+    assertTest(stringifiedWithSlashes.contains("\\\"api\\\""), "Quotes around keys are escaped as \\\"")
+    assertTest(stringifiedWithSlashes.contains("\\\\\\\"world\\\\\\\""), "Quotes inside string values are escaped as \\\\\\\"")
+    
+    // Test with slash escaping disabled
+    let stringifiedWithoutSlashes = val.stringify(escapeSlashes: false)
+    assertTest(stringifiedWithoutSlashes.contains("/v1/users"), "Forward slashes remain unescaped when escapeSlashes: false")
+} catch {
+    assertTest(false, "Failed to test stringify: \(error)")
+}
+
+// 16. Test Unescaping stringified JSON containing escaped slashes and quotes
+do {
+    let stringifiedInput = "\"{\\\"api\\\":\\\"\\\\/v1\\\\/users\\\",\\\"count\\\":10,\\\"active\\\":true}\""
+    let unescaped = JSONValue.unescapeStringifiedJSON(stringifiedInput)
+    assertTest(!unescaped.hasPrefix("\"{\\\""), "Unescape strips string literal outer quotes and unescapes quotes")
+    
+    let parsedUnescaped = try? JSONParser.parse(unescaped)
+    assertTest(parsedUnescaped != nil, "Unescaped result parses as valid JSON")
+    if case .object(let pairs) = parsedUnescaped {
+        assertTest(pairs.count == 3, "Unescaped object has 3 properties")
+        assertTest(pairs[0].key == "api", "First property key is 'api'")
+    }
+}
+
+// 17. Test Python Object Serialization (toPythonObject)
+do {
+    let json = """
+    {
+      "name": "Alice",
+      "is_admin": true,
+      "is_guest": false,
+      "address": null,
+      "score": 100,
+      "tags": ["admin", "staff"]
+    }
+    """
+    let val = try JSONParser.parse(json)
+    let py = val.toPythonObject(indentSpaces: 4)
+    
+    assertTest(py.contains("'is_admin': True"), "JSON true serialized to Python True")
+    assertTest(py.contains("'is_guest': False"), "JSON false serialized to Python False")
+    assertTest(py.contains("'address': None"), "JSON null serialized to Python None")
+    assertTest(py.contains("'name': 'Alice'"), "JSON string serialized to Python 'Alice'")
+    assertTest(py.contains("[\n        'admin',\n        'staff'\n    ]"), "JSON array serialized to Python list")
+    assertTest(py.hasPrefix("{\n") && py.hasSuffix("}"), "Python dictionary properly structured with brackets")
+} catch {
+    assertTest(false, "Failed to test Python object serialization: \(error)")
+}
+
+// 18. Test Auto-unwrapping stringified JSON in JSONDocumentModel
+do {
+    let model = JSONDocumentModel()
+    model.settings.autoUnwrapStringified = true
+    
+    // Paste stringified JSON into model
+    model.rawText = "\"{\\\"service\\\":\\\"auth\\\",\\\"endpoints\\\":[\\\"\\\\/login\\\",\\\"\\\\/logout\\\"]}\""
+    let success = model.parseAndBuildTree(silent: true)
+    assertTest(success, "Stringified JSON parsed and unwrapped successfully")
+    assertTest(model.rootNode?.children?.count == 2, "Root node directly contains 2 children from unwrapped object")
+    assertTest(model.rootNode?.children?[0].key == "service", "First unwrapped child is 'service'")
+    assertTest(model.rootNode?.children?[1].key == "endpoints", "Second unwrapped child is 'endpoints'")
+}
+
+// 19. Test Format Options (4 spaces, Tab, alphabetical sorting)
+do {
+    let json = """
+    {
+      "zebra": 1,
+      "apple": 2,
+      "mango": 3
+    }
+    """
+    let val = try JSONParser.parse(json)
+    
+    // Sort keys enabled
+    let sorted = val.format(options: JSONFormatOptions(indentSpaces: 4, sortKeys: true, escapeSlashes: false))
+    let expectedSorted = """
+    {
+        "apple": 2,
+        "mango": 3,
+        "zebra": 1
+    }
+    """
+    assertTest(sorted == expectedSorted, "Format with sortKeys: true orders keys alphabetically")
+    
+    // Tabs indentation
+    let tabs = val.format(options: JSONFormatOptions(indentSpaces: -1, sortKeys: false, escapeSlashes: false))
+    assertTest(tabs.contains("{\n\t\"zebra\": 1"), "Format with indentSpaces: -1 uses tab indentation")
+} catch {
+    assertTest(false, "Failed to test format options: \(error)")
+}
+
+// 20. Test Model Transformations (beautifyText, minifyText, stringifyText, unescapeText)
+do {
+    let model = JSONDocumentModel()
+    model.rawText = "{\"b\":2,\"a\":1}"
+    
+    // Beautify
+    model.settings.indentSpaces = 2
+    model.settings.sortKeysAlphabetically = true
+    model.beautifyText()
+    assertTest(model.rawText.contains("\"a\": 1"), "Beautify formats and sorts keys")
+    
+    // Minify
+    model.minifyText()
+    assertTest(model.rawText == "{\"a\":1,\"b\":2}", "Minify strips whitespace")
+    
+    // Stringify
+    model.stringifyText()
+    assertTest(model.rawText.hasPrefix("\"") && model.rawText.hasSuffix("\""), "Stringify wraps in quotes")
+    assertTest(model.rawText.contains("\\\"a\\\":1"), "Stringify escapes internal quotes")
+    
+    // Unescape
+    model.unescapeText()
+    assertTest(!model.rawText.hasPrefix("\"{\\\""), "Unescape restores formatted JSON")
+    assertTest(model.parseError == nil, "Model has no parse error after unescape")
+}
+
 print("\n-----------------------------------------")
 print("Total Tests: \(totalTests)")
 print("Passed:      \(passedTests)")

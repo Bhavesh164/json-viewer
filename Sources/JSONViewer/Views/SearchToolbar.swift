@@ -3,7 +3,7 @@ import JSONViewerCore
 
 public struct SearchToolbar: View {
     @ObservedObject var model: JSONDocumentModel
-    @State private var isSearchFieldFocused: Bool = false
+    @UIState private var isSearchFieldFocused: Bool = false
     
     public init(model: JSONDocumentModel) {
         self.model = model

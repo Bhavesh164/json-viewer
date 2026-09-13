@@ -64,15 +64,34 @@ Inspect element properties in a 2-column table with click-to-jump tree synchroni
 
 ---
 
-### 3. Native Text Editor
-A full-featured code editor with instant syntax feedback:
+### 3. Native Text Editor & Transformations (Middle Tab)
+A full-featured code editor with instant syntax feedback and rich serialization tools:
 
-- ⚡ **Editor Actions**:
-  - **Paste / Copy**: Fast clipboard integration.
-  - **Clear**: Clears text buffer.
+- ⚡ **Editor Actions & Transformations**:
+  - **Format (Beautify)**: Prettifies JSON with configured indentation (2 spaces, 4 spaces, tabs).
+  - **Minify**: Compresses JSON to a single line without spaces.
+  - **Stringify**: Serializes JSON or text into an escaped JSON string literal with forward slash escaping (`\/`) and quote escaping (`\"`).
+  - **Unescape**: Unwraps stringified JSON or decode escape characters (`\/`, `\"`, `\\`, `\n`) back into clean formatted JSON.
+  - **Multi-Format Copy**: Copy as Beautified JSON, Minified JSON, Stringified JSON, or Python Object literal.
+  - **Paste / Clear**: Fast clipboard integration and buffer reset.
 - 🛡️ **Syntax Validation**: Real-time error detection reporting exact line and column numbers.
 - 📊 **Status Bar**: Real-time line and character counter.
 - 📁 **Native macOS File Handling**: Open (`Cmd+O`) and Save (`Cmd+S`) `.json` files.
+
+---
+
+### 4. Multi-Format Copy & Python Serialization (Viewer Screen)
+Copy your JSON in whatever format you need directly from the Viewer toolbar or Text Editor:
+- 📋 **Copy Beautified JSON**: Configurable indentation (2-space, 4-space, tabs).
+- ⚡ **Copy Minified JSON**: Single-line compact JSON.
+- 🔤 **Copy as Stringified JSON**: Escaped string literal with quotes (`\"`) and forward slashes (`\/`).
+- 🐍 **Copy as Python Object**: Native Python dictionary/list representation using `True`, `False`, `None`, and single-quoted strings.
+
+---
+
+### 5. Settings Page & Keyboard Shortcuts Cheatsheet
+- ⚙️ **Settings (`⌘,`)**: Configure indentation (2 spaces, 4 spaces, tabs), forward slash escaping (`\/`), alphabetical key sorting, auto-unwrapping of stringified JSON, editor font size, and word wrapping.
+- ⌨️ **Keyboard Shortcuts Cheatsheet (`?`)**: Press <kbd>?</kbd> anytime outside text fields or <kbd>⌘</kbd> <kbd>?</kbd> anywhere to open a beautiful categorized shortcuts overlay with instant search.
 
 ---
 
@@ -132,6 +151,11 @@ swift run JSONViewerTests
 
 | Shortcut | Action |
 | :--- | :--- |
+| <kbd>?</kbd> or <kbd>⌘</kbd> <kbd>?</kbd> | Show Keyboard Shortcuts Cheatsheet Modal |
+| <kbd>⌘</kbd> <kbd>,</kbd> | Open Settings / Preferences Dialog |
+| <kbd>⌘</kbd> <kbd>1</kbd> | Switch to Viewer Tab |
+| <kbd>⌘</kbd> <kbd>2</kbd> | Switch to Text Editor Tab |
+| <kbd>⌘</kbd> <kbd>3</kbd> | Switch to Split View Tab |
 | <kbd>⌘</kbd> <kbd>⌥</kbd> <kbd>P</kbd> | Toggle Properties Panel (Show / Hide) |
 | <kbd>⌘</kbd> <kbd>K</kbd> | Clear Editor |
 | <kbd>⌘</kbd> <kbd>F</kbd> | Focus Search Bar / Find |
@@ -143,8 +167,10 @@ swift run JSONViewerTests
 | <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>E</kbd> | Collapse All Tree Nodes |
 | <kbd>⌘</kbd> <kbd>+</kbd> | Zoom In Font Size |
 | <kbd>⌘</kbd> <kbd>-</kbd> | Zoom Out Font Size |
+| <kbd>⌘</kbd> <kbd>0</kbd> | Reset Font Size to Default (12pt) |
 | <kbd>⌘</kbd> <kbd>O</kbd> | Open JSON File |
 | <kbd>⌘</kbd> <kbd>S</kbd> | Save JSON File |
+| <kbd>Esc</kbd> | Dismiss Shortcuts / Search Bar |
 
 ---
 

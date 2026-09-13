@@ -11,7 +11,7 @@ public struct TextEditorView: View {
     
     public var body: some View {
         VStack(spacing: 0) {
-            // Text Toolbar matching jsonviewer.stack.hu
+            // Text Toolbar matching jsonviewer.stack.hu with Format, Minify, Stringify, Unescape
             HStack(spacing: 6) {
                 Button(action: {
                     model.pasteText()
@@ -21,16 +21,31 @@ public struct TextEditorView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 
-                Button(action: {
+                // Copy split-menu with 4 formats
+                Menu {
+                    Button(action: { model.copyBeautified() }) {
+                        Label("Copy Beautified JSON", systemImage: "text.alignleft")
+                    }
+                    Button(action: { model.copyMinified() }) {
+                        Label("Copy Minified JSON", systemImage: "arrow.right.to.line.compact")
+                    }
+                    Button(action: { model.copyStringified() }) {
+                        Label("Copy as Stringified JSON", systemImage: "quote.bubble")
+                    }
+                    Button(action: { model.copyPythonObject() }) {
+                        Label("Copy as Python Object", systemImage: "curlybraces.square")
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: model.copiedToastMessage != nil ? "checkmark" : "doc.on.doc")
+                        Text(model.copiedToastMessage ?? "Copy")
+                    }
+                } primaryAction: {
                     model.copyText()
-                }) {
-                    Label("Copy", systemImage: "doc.on.doc")
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderedButton)
                 .controlSize(.small)
-                
-                Divider()
-                    .frame(height: 16)
+                .help("Click to copy text, or open dropdown to copy formatted, minified, stringified, or Python object")
                 
                 Button(action: {
                     model.clearText()
@@ -39,6 +54,46 @@ public struct TextEditorView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                
+                Divider()
+                    .frame(height: 16)
+                
+                // Format & Transform options in middle tab
+                Button(action: {
+                    model.beautifyText()
+                }) {
+                    Label("Format", systemImage: "text.alignleft")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Format JSON with configured indentation")
+                
+                Button(action: {
+                    model.minifyText()
+                }) {
+                    Label("Minify", systemImage: "arrow.right.to.line.compact")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Minify JSON into single line")
+                
+                Button(action: {
+                    model.stringifyText()
+                }) {
+                    Label("Stringify", systemImage: "quote.bubble")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Stringify JSON into escaped string literal with slashes (\\/) and quotes (\\\")")
+                
+                Button(action: {
+                    model.unescapeText()
+                }) {
+                    Label("Unescape", systemImage: "character.textbox")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Unescape stringified JSON or escaped slashes/characters back to formatted JSON")
                 
                 Spacer()
                 
@@ -78,12 +133,22 @@ public struct TextEditorView: View {
                 .help("Zoom In (Cmd +)")
                 
                 Button(action: {
-                    model.isAboutSheetPresented = true
+                    model.isShortcutsSheetPresented = true
                 }) {
-                    Text("About")
+                    Image(systemName: "questionmark.circle")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("Keyboard Shortcuts (?)")
+                
+                Button(action: {
+                    model.isSettingsSheetPresented = true
+                }) {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Settings (Cmd+,)")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -92,7 +157,7 @@ public struct TextEditorView: View {
             Divider()
             
             // Editor Area with Native Text Editor
-            NativeCodeEditor(text: $model.rawText, fontSize: model.fontSize)
+            NativeCodeEditor(text: $model.rawText, fontSize: model.fontSize, wrapLines: model.settings.wrapLines)
                 .overlay(alignment: .topLeading) {
                     if model.rawText.isEmpty {
                         Text("Paste the JSON code here (your code is not saved anywhere)")
@@ -166,6 +231,7 @@ public struct TextEditorView: View {
 struct NativeCodeEditor: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat = 13
+    var wrapLines: Bool = false
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -194,6 +260,15 @@ struct NativeCodeEditor: NSViewRepresentable {
         textView.allowsUndo = true
         textView.isRichText = false
         
+        if wrapLines {
+            textView.isHorizontallyResizable = false
+            textView.textContainer?.widthTracksTextView = true
+        } else {
+            textView.isHorizontallyResizable = true
+            textView.textContainer?.widthTracksTextView = false
+            textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        }
+        
         // Critical for performance: only lay out visible text lines instead of calculating millions of glyphs
         textView.layoutManager?.allowsNonContiguousLayout = true
         
@@ -213,6 +288,15 @@ struct NativeCodeEditor: NSViewRepresentable {
         
         if textView.font?.pointSize != fontSize {
             textView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        }
+        
+        let isCurrentlyWrapping = textView.textContainer?.widthTracksTextView == true
+        if isCurrentlyWrapping != wrapLines {
+            textView.isHorizontallyResizable = !wrapLines
+            textView.textContainer?.widthTracksTextView = wrapLines
+            if !wrapLines {
+                textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            }
         }
         
         // If the update was triggered by the user typing directly in this textView, skip immediately!

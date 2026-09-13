@@ -32,6 +32,35 @@ public struct TreeViewer: View {
                 Divider()
                     .frame(height: 14)
                 
+                // Copy Dropdown Menu
+                Menu {
+                    Button(action: { model.copyBeautified() }) {
+                        Label("Copy Beautified JSON", systemImage: "text.alignleft")
+                    }
+                    Button(action: { model.copyMinified() }) {
+                        Label("Copy Minified JSON", systemImage: "arrow.right.to.line.compact")
+                    }
+                    Button(action: { model.copyStringified() }) {
+                        Label("Copy as Stringified JSON", systemImage: "quote.bubble")
+                    }
+                    Button(action: { model.copyPythonObject() }) {
+                        Label("Copy as Python Object", systemImage: "curlybraces.square")
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: model.copiedToastMessage != nil ? "checkmark" : "doc.on.doc")
+                        Text(model.copiedToastMessage ?? "Copy")
+                    }
+                } primaryAction: {
+                    model.copyBeautified()
+                }
+                .menuStyle(.borderedButton)
+                .controlSize(.small)
+                .help("Click to copy beautified JSON, or open dropdown to copy minified, stringified, or Python object")
+                
+                Divider()
+                    .frame(height: 14)
+                
                 Button(action: { model.zoomOut() }) {
                     Image(systemName: "minus.magnifyingglass")
                 }
@@ -127,8 +156,8 @@ struct FlatTreeNodeRow: View, Equatable {
     var viewportWidth: CGFloat = 800
     let model: JSONDocumentModel
     
-    @State private var isKeyHovered: Bool = false
-    @State private var isCopied: Bool = false
+    @UIState private var isKeyHovered: Bool = false
+    @UIState private var isCopied: Bool = false
     
     static func == (lhs: FlatTreeNodeRow, rhs: FlatTreeNodeRow) -> Bool {
         lhs.row.node.id == rhs.row.node.id &&

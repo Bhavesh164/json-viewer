@@ -31,7 +31,12 @@ public final class JSONDocumentModel: ObservableObject {
     @Published public var expandedLeafNodeIds: Set<String> = []
     @Published public var visibleTreeRows: [FlatTreeRow] = []
     @Published public var selectedNodeProperties: [PropertyGridRow] = []
-    @Published public var fontSize: CGFloat = 12.0
+    public let settings: AppSettings
+    @Published public var fontSize: CGFloat = 12.0 {
+        didSet {
+            settings.fontSize = fontSize
+        }
+    }
     
     // Zoom / Font Scaling
     public func zoomIn() {
@@ -66,7 +71,10 @@ public final class JSONDocumentModel: ObservableObject {
     
     // Sheets & UI Panels
     @Published public var isAboutSheetPresented: Bool = false
+    @Published public var isShortcutsSheetPresented: Bool = false
+    @Published public var isSettingsSheetPresented: Bool = false
     @Published public var isPropertiesVisible: Bool = true
+    @Published public var copiedToastMessage: String? = nil
     
     // Status metrics
     public var isDirty: Bool = false
@@ -114,7 +122,13 @@ public final class JSONDocumentModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.12, execute: work)
     }
     
-    public init() {
+    public init(settings: AppSettings = .shared) {
+        self.settings = settings
+        self.fontSize = settings.fontSize
+        if let initialTab = AppTab(rawValue: settings.defaultTab) {
+            self.activeTab = initialTab
+        }
+        
         // Provide sample JSON to show immediate value
         let sample = """
         {
@@ -167,7 +181,18 @@ public final class JSONDocumentModel: ObservableObject {
         }
         
         do {
-            let parsed = try JSONParser.parse(trimmed)
+            var parsed = try JSONParser.parse(trimmed)
+            
+            // Auto-unwrap stringified JSON if enabled
+            if settings.autoUnwrapStringified, case .string(let innerStr) = parsed {
+                let innerTrimmed = innerStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                if (innerTrimmed.hasPrefix("{") && innerTrimmed.hasSuffix("}")) || (innerTrimmed.hasPrefix("[") && innerTrimmed.hasSuffix("]")) {
+                    if let innerParsed = try? JSONParser.parse(innerTrimmed) {
+                        parsed = innerParsed
+                    }
+                }
+            }
+            
             self.jsonValue = parsed
             let root = JSONNode.buildTree(from: parsed, rootKey: "JSON")
             self.rootNode = root
@@ -213,11 +238,135 @@ public final class JSONDocumentModel: ObservableObject {
         clearSearch()
     }
     
+    // MARK: - Text Transformations (Middle Tab)
+    public func beautifyText() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            var val = try JSONParser.parse(trimmed)
+            if settings.autoUnwrapStringified, case .string(let s) = val {
+                let sTrim = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let unwrap = try? JSONParser.parse(sTrim) {
+                    val = unwrap
+                }
+            }
+            self.rawText = val.format(
+                indentSpaces: settings.indentSpaces,
+                sortKeys: settings.sortKeysAlphabetically,
+                escapeSlashes: settings.escapeSlashesInStringify
+            )
+            self.parseAndBuildTree(silent: true)
+            triggerCopyFeedback("Formatted JSON")
+        } catch {
+            showError("Cannot format: Invalid JSON (\(error.localizedDescription))")
+        }
+    }
+    
+    public func minifyText() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            let val = try JSONParser.parse(trimmed)
+            self.rawText = val.minify(escapeSlashes: settings.escapeSlashesInStringify)
+            self.parseAndBuildTree(silent: true)
+            triggerCopyFeedback("Minified JSON")
+        } catch {
+            showError("Cannot minify: Invalid JSON (\(error.localizedDescription))")
+        }
+    }
+    
+    public func stringifyText() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        
+        if let val = try? JSONParser.parse(trimmed) {
+            self.rawText = val.stringify(escapeSlashes: settings.escapeSlashesInStringify)
+        } else {
+            self.rawText = JSONValue.quoteAndEscapeString(rawText, escapeSlashes: settings.escapeSlashesInStringify)
+        }
+        self.parseAndBuildTree(silent: true)
+        triggerCopyFeedback("Stringified JSON")
+    }
+    
+    public func unescapeText() {
+        let unescaped = JSONValue.unescapeStringifiedJSON(rawText)
+        self.rawText = unescaped
+        self.parseAndBuildTree(silent: true)
+        triggerCopyFeedback("Unescaped JSON")
+    }
+    
     // MARK: - Clipboard Operations
     public func copyText() {
+        copyToClipboard(rawText)
+        triggerCopyFeedback("Copied Text!")
+    }
+    
+    public func copyBeautified() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let val = jsonValue ?? (try? JSONParser.parse(trimmed)) {
+            let text = val.format(
+                indentSpaces: settings.indentSpaces,
+                sortKeys: settings.sortKeysAlphabetically,
+                escapeSlashes: false
+            )
+            copyToClipboard(text)
+            triggerCopyFeedback("Copied Beautified JSON!")
+        } else {
+            copyToClipboard(rawText)
+            triggerCopyFeedback("Copied Text!")
+        }
+    }
+    
+    public func copyMinified() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let val = jsonValue ?? (try? JSONParser.parse(trimmed)) {
+            let text = val.minify(escapeSlashes: false)
+            copyToClipboard(text)
+            triggerCopyFeedback("Copied Minified JSON!")
+        } else {
+            copyToClipboard(rawText)
+            triggerCopyFeedback("Copied Text!")
+        }
+    }
+    
+    public func copyStringified() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let val = jsonValue ?? (try? JSONParser.parse(trimmed)) {
+            let text = val.stringify(escapeSlashes: settings.escapeSlashesInStringify)
+            copyToClipboard(text)
+            triggerCopyFeedback("Copied Stringified JSON!")
+        } else {
+            let text = JSONValue.quoteAndEscapeString(rawText, escapeSlashes: settings.escapeSlashesInStringify)
+            copyToClipboard(text)
+            triggerCopyFeedback("Copied Stringified Text!")
+        }
+    }
+    
+    public func copyPythonObject() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let val = jsonValue ?? (try? JSONParser.parse(trimmed)) {
+            let text = val.toPythonObject(indentSpaces: settings.indentSpaces < 0 ? 4 : settings.indentSpaces)
+            copyToClipboard(text)
+            triggerCopyFeedback("Copied Python Object!")
+        } else {
+            copyToClipboard(rawText)
+            triggerCopyFeedback("Copied Text!")
+        }
+    }
+    
+    private func copyToClipboard(_ str: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(rawText, forType: .string)
+        pasteboard.setString(str, forType: .string)
+    }
+    
+    public func triggerCopyFeedback(_ message: String = "Copied!") {
+        self.copiedToastMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            if self?.copiedToastMessage == message {
+                self?.copiedToastMessage = nil
+            }
+        }
     }
     
     public func pasteText() {

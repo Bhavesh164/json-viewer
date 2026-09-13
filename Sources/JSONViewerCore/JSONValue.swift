@@ -63,18 +63,37 @@ public enum JSONValue: Equatable, Sendable {
     }
 }
 
+// MARK: - Formatting Options & Serialization
+public struct JSONFormatOptions: Sendable {
+    public var indentSpaces: Int
+    public var sortKeys: Bool
+    public var escapeSlashes: Bool
+    
+    public init(indentSpaces: Int = 2, sortKeys: Bool = false, escapeSlashes: Bool = false) {
+        self.indentSpaces = indentSpaces
+        self.sortKeys = sortKeys
+        self.escapeSlashes = escapeSlashes
+    }
+}
+
 // MARK: - Formatting & Minification
 extension JSONValue {
     /// Format the JSON tree into pretty-printed string with specified indentation (default 2 spaces matching jsonviewer.stack.hu)
-    public func format(indentSpaces: Int = 2) -> String {
+    public func format(indentSpaces: Int = 2, sortKeys: Bool = false, escapeSlashes: Bool = false) -> String {
+        let options = JSONFormatOptions(indentSpaces: indentSpaces, sortKeys: sortKeys, escapeSlashes: escapeSlashes)
+        return format(options: options)
+    }
+    
+    public func format(options: JSONFormatOptions) -> String {
         var output = ""
-        format(into: &output, currentIndent: 0, indentSpaces: indentSpaces)
+        format(into: &output, currentIndent: 0, options: options)
         return output
     }
     
-    private func format(into output: inout String, currentIndent: Int, indentSpaces: Int) {
-        let indent = String(repeating: " ", count: currentIndent)
-        let childIndent = String(repeating: " ", count: currentIndent + indentSpaces)
+    private func format(into output: inout String, currentIndent: Int, options: JSONFormatOptions) {
+        let indent = options.indentSpaces < 0 ? String(repeating: "\t", count: currentIndent) : String(repeating: " ", count: currentIndent)
+        let step = options.indentSpaces < 0 ? 1 : options.indentSpaces
+        let childIndent = options.indentSpaces < 0 ? String(repeating: "\t", count: currentIndent + 1) : String(repeating: " ", count: currentIndent + step)
         
         switch self {
         case .null:
@@ -84,7 +103,7 @@ extension JSONValue {
         case .number(_, let raw):
             output.append(raw)
         case .string(let str):
-            output.append(Self.escapeString(str))
+            output.append(Self.escapeString(str, escapeSlashes: options.escapeSlashes))
         case .array(let items):
             if items.isEmpty {
                 output.append("[]")
@@ -93,7 +112,206 @@ extension JSONValue {
             output.append("[\n")
             for (idx, item) in items.enumerated() {
                 output.append(childIndent)
-                item.format(into: &output, currentIndent: currentIndent + indentSpaces, indentSpaces: indentSpaces)
+                item.format(into: &output, currentIndent: currentIndent + step, options: options)
+                if idx < items.count - 1 {
+                    output.append(",")
+                }
+                output.append("\n")
+            }
+            output.append(indent + "]")
+        case .object(let pairs):
+            if pairs.isEmpty {
+                output.append("{}")
+                return
+            }
+            output.append("{\n")
+            let effectivePairs = options.sortKeys ? pairs.sorted { $0.key < $1.key } : pairs
+            for (idx, pair) in effectivePairs.enumerated() {
+                output.append(childIndent)
+                output.append(Self.escapeString(pair.key, escapeSlashes: options.escapeSlashes))
+                output.append(": ")
+                pair.value.format(into: &output, currentIndent: currentIndent + step, options: options)
+                if idx < effectivePairs.count - 1 {
+                    output.append(",")
+                }
+                output.append("\n")
+            }
+            output.append(indent + "}")
+        }
+    }
+    
+    /// Minify JSON into compact representation without whitespace outside strings
+    public func minify(escapeSlashes: Bool = false) -> String {
+        var output = ""
+        minify(into: &output, escapeSlashes: escapeSlashes)
+        return output
+    }
+    
+    private func minify(into output: inout String, escapeSlashes: Bool) {
+        switch self {
+        case .null:
+            output.append("null")
+        case .bool(let b):
+            output.append(b ? "true" : "false")
+        case .number(_, let raw):
+            output.append(raw)
+        case .string(let str):
+            output.append(Self.escapeString(str, escapeSlashes: escapeSlashes))
+        case .array(let items):
+            output.append("[")
+            for (idx, item) in items.enumerated() {
+                item.minify(into: &output, escapeSlashes: escapeSlashes)
+                if idx < items.count - 1 {
+                    output.append(",")
+                }
+            }
+            output.append("]")
+        case .object(let pairs):
+            output.append("{")
+            for (idx, pair) in pairs.enumerated() {
+                output.append(Self.escapeString(pair.key, escapeSlashes: escapeSlashes))
+                output.append(":")
+                pair.value.minify(into: &output, escapeSlashes: escapeSlashes)
+                if idx < pairs.count - 1 {
+                    output.append(",")
+                }
+            }
+            output.append("}")
+        }
+    }
+    
+    /// Stringify JSON into an escaped string literal with outer quotes.
+    /// When escapeSlashes is true, forward slashes '/' are escaped as '\/'.
+    public func stringify(escapeSlashes: Bool = true) -> String {
+        let min = self.minify(escapeSlashes: false)
+        return Self.quoteAndEscapeString(min, escapeSlashes: escapeSlashes)
+    }
+    
+    /// Helper to escape an arbitrary string into a JSON string literal with outer quotes.
+    public static func quoteAndEscapeString(_ str: String, escapeSlashes: Bool = true) -> String {
+        return escapeString(str, escapeSlashes: escapeSlashes)
+    }
+    
+    /// Convert an escaped or stringified JSON string back to normal JSON string.
+    public static func unescapeStringifiedJSON(_ text: String) -> String {
+        var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return s }
+        
+        // Remove outer quotes if present
+        if s.count >= 2 {
+            if (s.hasPrefix("\"") && s.hasSuffix("\"")) || (s.hasPrefix("'") && s.hasSuffix("'")) {
+                s = String(s.dropFirst().dropLast())
+            }
+        }
+        
+        var result = ""
+        var iter = s.makeIterator()
+        while let ch = iter.next() {
+            if ch == "\\" {
+                guard let next = iter.next() else {
+                    result.append(ch)
+                    break
+                }
+                switch next {
+                case "\"": result.append("\"")
+                case "'": result.append("'")
+                case "\\": result.append("\\")
+                case "/": result.append("/")
+                case "b": result.append("\u{08}")
+                case "f": result.append("\u{0C}")
+                case "n": result.append("\n")
+                case "r": result.append("\r")
+                case "t": result.append("\t")
+                case "u":
+                    var hex = ""
+                    for _ in 0..<4 {
+                        if let h = iter.next(), h.isHexDigit {
+                            hex.append(h)
+                        }
+                    }
+                    if hex.count == 4, let code = UInt32(hex, radix: 16), let scalar = UnicodeScalar(code) {
+                        result.append(Character(scalar))
+                    } else {
+                        result.append("\\u")
+                        result.append(hex)
+                    }
+                default:
+                    result.append(next)
+                }
+            } else {
+                result.append(ch)
+            }
+        }
+        
+        // If the unescaped string can be parsed as JSON, return it formatted; otherwise return the unescaped string
+        if let parsed = try? JSONParser.parse(result) {
+            return parsed.format(indentSpaces: 2)
+        }
+        
+        return result
+    }
+    
+    public static func escapeString(_ str: String, escapeSlashes: Bool = false) -> String {
+        var escaped = "\""
+        for ch in str {
+            switch ch {
+            case "\"": escaped.append("\\\"")
+            case "\\": escaped.append("\\\\")
+            case "/":
+                if escapeSlashes {
+                    escaped.append("\\/")
+                } else {
+                    escaped.append("/")
+                }
+            case "\t": escaped.append("\\t")
+            case "\n": escaped.append("\\n")
+            case "\r": escaped.append("\\r")
+            case "\u{08}": escaped.append("\\b")
+            case "\u{0C}": escaped.append("\\f")
+            default:
+                if let scalar = ch.unicodeScalars.first, scalar.value < 0x20 {
+                    escaped.append(String(format: "\\u%04x", scalar.value))
+                } else {
+                    escaped.append(ch)
+                }
+            }
+        }
+        escaped.append("\"")
+        return escaped
+    }
+}
+
+// MARK: - Python Object Serialization
+extension JSONValue {
+    /// Serialize JSON value into standard Python dict/list representation
+    public func toPythonObject(indentSpaces: Int = 4) -> String {
+        var output = ""
+        toPythonObject(into: &output, currentIndent: 0, indentSpaces: indentSpaces)
+        return output
+    }
+    
+    private func toPythonObject(into output: inout String, currentIndent: Int, indentSpaces: Int) {
+        let indent = String(repeating: " ", count: currentIndent)
+        let childIndent = String(repeating: " ", count: currentIndent + indentSpaces)
+        
+        switch self {
+        case .null:
+            output.append("None")
+        case .bool(let b):
+            output.append(b ? "True" : "False")
+        case .number(_, let raw):
+            output.append(raw)
+        case .string(let str):
+            output.append(Self.escapePythonString(str))
+        case .array(let items):
+            if items.isEmpty {
+                output.append("[]")
+                return
+            }
+            output.append("[\n")
+            for (idx, item) in items.enumerated() {
+                output.append(childIndent)
+                item.toPythonObject(into: &output, currentIndent: currentIndent + indentSpaces, indentSpaces: indentSpaces)
                 if idx < items.count - 1 {
                     output.append(",")
                 }
@@ -108,9 +326,9 @@ extension JSONValue {
             output.append("{\n")
             for (idx, pair) in pairs.enumerated() {
                 output.append(childIndent)
-                output.append(Self.escapeString(pair.key))
+                output.append(Self.escapePythonString(pair.key))
                 output.append(": ")
-                pair.value.format(into: &output, currentIndent: currentIndent + indentSpaces, indentSpaces: indentSpaces)
+                pair.value.toPythonObject(into: &output, currentIndent: currentIndent + indentSpaces, indentSpaces: indentSpaces)
                 if idx < pairs.count - 1 {
                     output.append(",")
                 }
@@ -120,51 +338,11 @@ extension JSONValue {
         }
     }
     
-    /// Minify JSON into compact representation without whitespace outside strings
-    public func minify() -> String {
-        var output = ""
-        minify(into: &output)
-        return output
-    }
-    
-    private func minify(into output: inout String) {
-        switch self {
-        case .null:
-            output.append("null")
-        case .bool(let b):
-            output.append(b ? "true" : "false")
-        case .number(_, let raw):
-            output.append(raw)
-        case .string(let str):
-            output.append(Self.escapeString(str))
-        case .array(let items):
-            output.append("[")
-            for (idx, item) in items.enumerated() {
-                item.minify(into: &output)
-                if idx < items.count - 1 {
-                    output.append(",")
-                }
-            }
-            output.append("]")
-        case .object(let pairs):
-            output.append("{")
-            for (idx, pair) in pairs.enumerated() {
-                output.append(Self.escapeString(pair.key))
-                output.append(":")
-                pair.value.minify(into: &output)
-                if idx < pairs.count - 1 {
-                    output.append(",")
-                }
-            }
-            output.append("}")
-        }
-    }
-    
-    private static func escapeString(_ str: String) -> String {
-        var escaped = "\""
+    private static func escapePythonString(_ str: String) -> String {
+        var escaped = "'"
         for ch in str {
             switch ch {
-            case "\"": escaped.append("\\\"")
+            case "'": escaped.append("\\'")
             case "\\": escaped.append("\\\\")
             case "\t": escaped.append("\\t")
             case "\n": escaped.append("\\n")
@@ -172,17 +350,18 @@ extension JSONValue {
             case "\u{08}": escaped.append("\\b")
             case "\u{0C}": escaped.append("\\f")
             default:
-                if ch.unicodeScalars.first!.value < 0x20 {
-                    escaped.append(String(format: "\\u%04x", ch.unicodeScalars.first!.value))
+                if let scalar = ch.unicodeScalars.first, scalar.value < 0x20 {
+                    escaped.append(String(format: "\\x%02x", scalar.value))
                 } else {
                     escaped.append(ch)
                 }
             }
         }
-        escaped.append("\"")
+        escaped.append("'")
         return escaped
     }
 }
+
 
 // MARK: - JSON Parser with Order Preservation & Error Reporting
 public struct JSONParseError: Error, LocalizedError, Equatable, Sendable {
