@@ -362,6 +362,26 @@ public final class JSONDocumentModel: ObservableObject {
         triggerCopyFeedback("Unescaped JSON")
     }
     
+    public func convertJsonToPython() {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            var val: JSONValue
+            if let direct = try? JSONParser.parse(trimmed) {
+                val = direct
+            } else if let pythonVal = try? PythonLiteralParser.parse(trimmed) {
+                val = pythonVal
+            } else {
+                val = try JSONParser.parse(trimmed)
+            }
+            let pythonText = val.toPythonObject(indentSpaces: settings.indentSpaces < 0 ? 4 : settings.indentSpaces)
+            self.rawText = pythonText
+            triggerCopyFeedback("Converted JSON to Python!")
+        } catch {
+            showError("Cannot convert: Invalid JSON (\(error.localizedDescription))")
+        }
+    }
+    
     public func convertPythonToJson() {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -369,7 +389,7 @@ public final class JSONDocumentModel: ObservableObject {
             let val = try PythonLiteralParser.parse(trimmed)
             self.rawText = val.format(indentSpaces: settings.indentSpaces, sortKeys: settings.sortKeysAlphabetically)
             self.parseAndBuildTree(silent: true)
-            triggerCopyFeedback("Converted Python Dictionary to JSON!")
+            triggerCopyFeedback("Converted Python to JSON!")
         } catch {
             showError("Cannot convert: Invalid Python dictionary syntax (\(error.localizedDescription))")
         }
@@ -454,15 +474,14 @@ public final class JSONDocumentModel: ObservableObject {
         if let string = pasteboard.string(forType: .string) {
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
             // Auto-convert Python dictionary to JSON on paste if not already standard JSON
-            if (trimmed.hasPrefix("{") || trimmed.hasPrefix("[")) && (try? JSONParser.parse(trimmed)) == nil {
-                if let pythonVal = try? PythonLiteralParser.parse(trimmed) {
-                    rawText = pythonVal.format(indentSpaces: settings.indentSpaces, sortKeys: settings.sortKeysAlphabetically)
-                    parseAndBuildTree(silent: true)
-                    triggerCopyFeedback("Converted Python Dictionary to JSON!")
-                    return
-                }
+            if (try? JSONParser.parse(trimmed)) == nil, let pythonVal = try? PythonLiteralParser.parse(trimmed) {
+                rawText = pythonVal.format(indentSpaces: settings.indentSpaces, sortKeys: settings.sortKeysAlphabetically)
+                parseAndBuildTree(silent: true)
+                triggerCopyFeedback("Converted Python Dictionary to JSON!")
+                return
             }
             rawText = string
+            parseAndBuildTree(silent: true)
         }
     }
     

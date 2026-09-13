@@ -95,6 +95,18 @@ public struct TextEditorView: View {
                 .controlSize(.small)
                 .help("Unescape stringified JSON or escaped slashes/characters back to formatted JSON")
                 
+                Divider()
+                    .frame(height: 16)
+                
+                Button(action: {
+                    model.convertJsonToPython()
+                }) {
+                    Label("JSON → Python", systemImage: "curlybraces.square")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Convert JSON in editor directly into Python dictionary format")
+                
                 Button(action: {
                     model.convertPythonToJson()
                 }) {
@@ -102,7 +114,7 @@ public struct TextEditorView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Convert Python dictionary or object literal in editor directly to standard JSON")
+                .help("Convert Python dictionary in editor directly into valid JSON")
                 
                 Spacer()
                 
@@ -230,12 +242,10 @@ final class EditorTextView: NSTextView {
     override func paste(_ sender: Any?) {
         if let pbString = NSPasteboard.general.string(forType: .string) {
             let trimmed = pbString.trimmingCharacters(in: .whitespacesAndNewlines)
-            if (trimmed.hasPrefix("{") || trimmed.hasPrefix("[")) && (try? JSONParser.parse(trimmed)) == nil {
-                if let pythonVal = try? PythonLiteralParser.parse(trimmed) {
-                    let formattedJSON = pythonVal.format(indentSpaces: 2, sortKeys: false)
-                    self.insertText(formattedJSON, replacementRange: self.selectedRange())
-                    return
-                }
+            if (try? JSONParser.parse(trimmed)) == nil, let pythonVal = try? PythonLiteralParser.parse(trimmed) {
+                let formattedJSON = pythonVal.format(indentSpaces: 2, sortKeys: false)
+                self.insertText(formattedJSON, replacementRange: self.selectedRange())
+                return
             }
         }
         super.paste(sender)

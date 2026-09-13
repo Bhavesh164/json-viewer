@@ -38,7 +38,19 @@ public struct PythonLiteralParser {
     }
     
     public static func parse(_ text: String) throws -> JSONValue {
-        var parser = PythonLiteralParser(text)
+        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Handle optional variable assignment like `data = {...}`, `config: dict = [...]`
+        if let eqIdx = cleaned.firstIndex(of: "=") {
+            let prefix = cleaned[..<eqIdx].trimmingCharacters(in: .whitespacesAndNewlines)
+            let validIdentChars = prefix.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == ":" || $0.isWhitespace }
+            if !prefix.isEmpty && validIdentChars.count == prefix.count {
+                let suffix = cleaned[cleaned.index(after: eqIdx)...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if suffix.hasPrefix("{") || suffix.hasPrefix("[") || suffix.hasPrefix("(") {
+                    cleaned = suffix
+                }
+            }
+        }
+        var parser = PythonLiteralParser(cleaned)
         parser.skipWhitespaceAndComments()
         guard parser.hasMore else {
             throw ParseError.unexpectedEOF

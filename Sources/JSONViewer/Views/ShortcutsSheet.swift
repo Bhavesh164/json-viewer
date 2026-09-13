@@ -34,6 +34,8 @@ public struct ShortcutsSheet: View {
         ShortcutItem(category: "Editor & Formatting", title: "Open JSON File", keys: ["⌘", "O"]),
         ShortcutItem(category: "Editor & Formatting", title: "Save JSON File", keys: ["⌘", "S"]),
         ShortcutItem(category: "Editor & Formatting", title: "Copy as Python Dictionary", keys: ["⌘", "⌥", "C"]),
+        ShortcutItem(category: "Editor & Formatting", title: "Convert JSON to Python", keys: ["JSON → Python"]),
+        ShortcutItem(category: "Editor & Formatting", title: "Convert Python to JSON", keys: ["Python → JSON"]),
         ShortcutItem(category: "Editor & Formatting", title: "Zoom In Font Size", keys: ["⌘", "+"]),
         ShortcutItem(category: "Editor & Formatting", title: "Zoom Out Font Size", keys: ["⌘", "-"]),
         ShortcutItem(category: "Editor & Formatting", title: "Reset Zoom / Font Size", keys: ["⌘", "0"]),

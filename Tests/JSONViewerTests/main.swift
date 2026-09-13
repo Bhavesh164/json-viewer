@@ -705,6 +705,20 @@ do {
     model.convertPythonToJson()
     assertTest(model.rawText.contains("\"env\": \"production\""), "convertPythonToJson converts to JSON")
     
+    // Test convertJsonToPython
+    model.rawText = "{\"env\": \"staging\", \"active\": true, \"count\": null}"
+    model.convertJsonToPython()
+    assertTest(model.rawText.contains("'env': 'staging'"), "convertJsonToPython formats keys with single quotes")
+    assertTest(model.rawText.contains("'active': True"), "convertJsonToPython converts true to True")
+    assertTest(model.rawText.contains("'count': None"), "convertJsonToPython converts null to None")
+    
+    // Test Python variable assignment prefix (e.g. data = {...})
+    model.rawText = "data = {'name': 'Alice', 'roles': ('admin', 'user')}"
+    let varAssignSuccess = model.parseAndBuildTree(silent: false)
+    assertTest(varAssignSuccess == true, "parseAndBuildTree succeeded with variable assignment prefix")
+    assertTest(model.rawText.contains("\"name\": \"Alice\""), "Variable assignment stripped and converted to JSON")
+    assertTest(model.rawText.contains("\"roles\": ["), "Python tuple in variable assignment converted to JSON array")
+    
     // Test copyPythonObject
     model.copyPythonObject()
     assertTest(model.copiedToastMessage == "Copied Python Dictionary!", "Toast displays Copied Python Dictionary!")
