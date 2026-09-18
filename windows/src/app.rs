@@ -10,8 +10,7 @@ use crate::python::parse_python_literal;
 use crate::settings::{Settings, SettingsStore};
 use crate::settings_dialog::{self, SettingsContext};
 use crate::util::{get_edit_text, get_window_text, set_editor_text, set_window_text, wide};
-use crate::value_dialog;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
@@ -62,7 +61,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MF_STRING, MINMAXINFO, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, WNDPROC, WS_BORDER,
     WS_CAPTION, WS_CLIPCHILDREN, WS_HSCROLL, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
     WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP, WS_VSCROLL, ES_AUTOHSCROLL,
-    ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, ES_READONLY, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
     WM_COPY, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_CUT, WM_DESTROY, WM_DRAWITEM, WM_NOTIFY,
     WM_PASTE, WM_SETFONT, WM_SIZE, WM_TIMER, WM_USER, WM_CHAR,
     WM_CLOSE, WM_NCDESTROY, WM_KEYDOWN, WM_SYSKEYDOWN,
@@ -101,6 +100,12 @@ const IDC_SEARCH_NEXT: u32 = 214;
 const IDC_SEARCH_STATUS: u32 = 215;
 const IDC_STATUS: u32 = 220;
 const IDC_PATH: u32 = 221;
+// Inline expand panel (macOS parity: full-width wrapped text below the tree,
+// not a separate popup). Docked inside the main window.
+const IDC_EXPAND_LABEL: u32 = 230;
+const IDC_EXPAND_TEXT: u32 = 231;
+const IDC_EXPAND_COPY: u32 = 232;
+const IDC_EXPAND_COLLAPSE: u32 = 233;
 
 // Menu-only command IDs
 const IDM_EXIT: u32 = 1003;
@@ -170,6 +175,9 @@ const DARK_BORDER: u32 = 0x3F3F46;
 const DARK_BTN: u32 = 0x2D2D2D;
 const DARK_BTN_DOWN: u32 = 0x094771;
 const DARK_ACCENT_BG: u32 = 0x094771;
+// Search matches (non-current): bright yellow text on the dark row, like the
+// mac yellow MATCH badge — distinct from the brown selection background.
+const SEARCH_MATCH_TEXT: u32 = 0x0000FFFF; // COLORREF 0x00BBGGRR: R=FF G=FF B=00
 
 static mut APP_PTR: usize = 0;
 /// Original search-edit proc. Global (not via `app_of`) so the subclass can
@@ -223,6 +231,12 @@ struct Controls {
     editor: HWND,
     tree: HWND,
     grid: HWND,
+    // Inline expand panel: full-width wrapped text below the tree
+    // (macOS expanded big-text parity — no separate popup window).
+    expand_label: HWND,
+    expand_text: HWND,
+    expand_copy: HWND,
+    expand_collapse: HWND,
     search_label: HWND,
     search_edit: HWND,
     search_go: HWND,
@@ -272,6 +286,15 @@ struct App {
     expand_on_fill_done: bool,
     /// Tree path right-clicked for the context menu.
     ctx_path: Option<String>,
+    /// Inline expand panel state (macOS expanded big-text parity).
+    /// `expand_visible == false` means collapsed; `expand_path` is the leaf
+    /// whose full text the panel shows (== selected path when visible).
+    expand_visible: bool,
+    expand_path: Option<String>,
+    /// All current search-match paths (mirrors `model.search_results` for
+    /// O(1) custom-draw lookup). Painted yellow; the current match gets the
+    /// brown selection background like a manual click.
+    search_marks: HashSet<String>,
 }
 
 /// One chunked background fill of the native TreeView.
@@ -376,6 +399,7 @@ fn apply_font_to_controls(app: &App) {
         app.ctrl.search_status,
         app.ctrl.status,
         app.ctrl.path,
+        app.ctrl.expand_text,
     ] {
         set_font(h, app.font_mono);
     }
@@ -390,6 +414,9 @@ fn apply_font_to_controls(app: &App) {
         app.ctrl.search_go,
         app.ctrl.search_prev,
         app.ctrl.search_next,
+        app.ctrl.expand_label,
+        app.ctrl.expand_copy,
+        app.ctrl.expand_collapse,
     ] {
         set_font(h, app.font_ui);
     }
@@ -594,10 +621,18 @@ fn tree_expand(app: &App, item: isize, expand: bool) {
 fn begin_tree_fill(app: &mut App) {
     cancel_tree_fill(app);
     app.tree_complete = false;
+    // New tree → stale inline-expand selection is meaningless; hide panel.
+    app.expand_visible = false;
+    app.expand_path = None;
     send(app.ctrl.tree, TVM_DELETEITEM, 0, TVI_ROOT.0 as isize);
     app.item_to_path.clear();
     app.path_to_item.clear();
     app.container_items.clear();
+    // Keep search highlights consistent with the model (Clear empties them;
+    // re-parse of the same doc preserves them for incoming rows).
+    app.search_marks.clear();
+    app.search_marks
+        .extend(app.model.search_results.iter().cloned());
     send(app.ctrl.grid, LVM_DELETEALLITEMS, 0, 0);
     app.grid_rows.clear();
     app.grid_truncated = None;
@@ -833,6 +868,158 @@ fn resize_grid_columns(app: &App) {
         send(app.ctrl.grid, LVM_SETCOLUMNWIDTH, 0, prop as isize);
         send(app.ctrl.grid, LVM_SETCOLUMNWIDTH, 1, val as isize);
         send(app.ctrl.grid, LVM_SETCOLUMNWIDTH, 2, typ as isize);
+    }
+}
+
+// ---------------- inline expand panel (macOS parity) ----------------
+// macOS shows long strings inline as a full-width wrapped textarea below the
+// row (with char count + Copy + collapse). Windows previously opened a
+// separate popup window — this panel docks the same content inside the main
+// window, under the tree, so there is no extra OS window.
+
+/// Currently selected long-text leaf, if any: (key, full_value).
+fn selected_long_text(app: &App) -> Option<(String, String)> {
+    let path = app.model.selected_path.as_ref()?;
+    let node = app.model.find_node(path)?;
+    match &node.value {
+        crate::json::JSONValue::Str(s) if node.is_long_text() => {
+            Some((node.key.clone(), s.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn expand_header_text(key: &str, full: &str) -> (String, usize) {
+    let chars = full.encode_utf16().count();
+    let short: String = if key.chars().count() > 40 {
+        format!("{}…", key.chars().take(40).collect::<String>())
+    } else {
+        key.to_string()
+    };
+    (format!("{} • {} chars", short, chars), chars)
+}
+
+/// True when the inline panel should be visible and laid out.
+fn expand_should_show(app: &App) -> bool {
+    if matches!(app.model.active_tab, AppTab::Text) {
+        return false;
+    }
+    if !app.expand_visible {
+        return false;
+    }
+    match (&app.expand_path, &app.model.selected_path) {
+        (Some(ep), Some(sel)) if ep == sel => selected_long_text(app).is_some(),
+        _ => false,
+    }
+}
+
+/// Fill the panel widgets from the currently selected long-text node.
+/// Call after selection changes; caller should then call `layout(app)`.
+fn refresh_expand_panel(app: &mut App) {
+    if matches!(app.model.active_tab, AppTab::Text) {
+        return;
+    }
+    let sel = app.model.selected_path.clone();
+    let long = selected_long_text(app);
+    match (sel, long) {
+        (Some(p), Some((k, full))) => {
+            if app.expand_path.as_ref() != Some(&p) {
+                // New long node selected → auto-expand inline (mac parity:
+                // the full-width text appears without opening anything).
+                app.expand_path = Some(p);
+                app.expand_visible = true;
+            }
+            let (header, _) = expand_header_text(&k, &full);
+            unsafe {
+                set_window_text(app.ctrl.expand_label, &header);
+                set_editor_text(app.ctrl.expand_text, &full);
+            }
+        }
+        _ => {
+            // Non-long selection: keep flags (so going back restores), but
+            // `expand_should_show` will be false so layout hides the panel.
+        }
+    }
+}
+
+fn show_expand_inline(app: &mut App, path: String) {
+    app.expand_path = Some(path.clone());
+    app.expand_visible = true;
+    app.model.selected_path = Some(path.clone());
+    if let Some(n) = app.model.find_node(&path) {
+        if let crate::json::JSONValue::Str(s) = &n.value {
+            let (header, _) = expand_header_text(&n.key, s);
+            let full = s.clone();
+            unsafe {
+                set_window_text(app.ctrl.expand_label, &header);
+                set_editor_text(app.ctrl.expand_text, &full);
+            }
+        }
+    }
+    layout(app);
+}
+
+fn hide_expand_inline(app: &mut App) {
+    app.expand_visible = false;
+    layout(app);
+}
+
+fn toggle_expand_inline(app: &mut App, path: String) {
+    if app.expand_visible && app.expand_path.as_ref() == Some(&path) {
+        hide_expand_inline(app);
+    } else {
+        show_expand_inline(app, path);
+    }
+}
+
+fn copy_expand_text(app: &App) {
+    let full: Option<String> = app
+        .expand_path
+        .as_ref()
+        .and_then(|p| app.model.find_node(p))
+        .and_then(|n| match &n.value {
+            crate::json::JSONValue::Str(s) => Some(s.clone()),
+            _ => None,
+        });
+    if let Some(text) = full {
+        if clipboard::set_text(&text) {
+            unsafe {
+                set_window_text(app.ctrl.status, "Copied!");
+            }
+        }
+    }
+}
+
+/// Mirror `model.search_results` into the draw-fast `search_marks` set and
+/// repaint the tree so old yellow rows clear and new ones appear.
+fn sync_search_marks(app: &mut App) {
+    app.search_marks.clear();
+    app.search_marks
+        .extend(app.model.search_results.iter().cloned());
+    unsafe {
+        let _ = InvalidateRect(app.ctrl.tree, None, BOOL(1));
+    }
+}
+
+/// Scroll the TreeView so the model-selected node is visible. Called AFTER
+/// `layout(app)` — resizing the tree first can reset the scroll position,
+/// which is why search jumps previously landed on the right node (grid /
+/// expand panel / status all correct) yet the tree still showed the top.
+fn ensure_selected_visible(app: &App) {
+    let item = app
+        .model
+        .selected_path
+        .as_ref()
+        .and_then(|p| app.path_to_item.get(p).copied());
+    if let Some(it) = item {
+        send(app.ctrl.tree, TVM_ENSUREVISIBLE, 0, it);
+    }
+}
+
+fn clear_search_marks_and_repaint(app: &mut App) {
+    app.search_marks.clear();
+    unsafe {
+        let _ = InvalidateRect(app.ctrl.tree, None, BOOL(1));
     }
 }
 
@@ -1099,9 +1286,16 @@ fn do_search(app: &mut App, dir: i32) {
     } else {
         app.model.search_previous(&settings);
     }
+    sync_search_marks(app);
     if let Some(sel) = app.model.selected_path.clone() {
         reveal_path(app, &sel, true);
         refresh_grid(app);
+        refresh_expand_panel(app);
+        layout(app);
+        // Resize first, scroll second: layout can reset the TreeView scroll
+        // position, so ensuring before layout left the right node selected
+        // (grid/expand/status correct) but the tree still showing the top.
+        ensure_selected_visible(app);
     }
     refresh_status(app);
 }
@@ -1125,6 +1319,7 @@ fn set_tab(app: &mut App, tab: AppTab) {
         cancel_tree_fill(app);
     }
     app.model.active_tab = tab;
+    refresh_expand_panel(app);
     layout(app);
     // Repaint the tab buttons: owner-drawn highlight reads `active_tab` at
     // WM_DRAWITEM time, and moving/resizing alone doesn't always invalidate
@@ -1191,7 +1386,7 @@ fn apply_wrap_style(app: &App) {
 
 fn show_shortcuts(hwnd: HWND) {
     show_info(hwnd, "Keyboard Shortcuts",
-        "General:\r\n  Ctrl+,  Settings\r\n  Ctrl+1/2/3  Viewer / Text / Split tabs\r\n\r\nTree Viewer:\r\n  Ctrl+E  Expand all    Ctrl+Shift+E  Collapse all\r\n  Ctrl+Alt+P  Toggle properties panel\r\n  Click node to inspect - double-click grid row to jump\r\n  Right-click node for copy / expand menu\r\n  Double-click a long value to expand its full text\r\n\r\nEditor:\r\n  Ctrl+X / Ctrl+C / Ctrl+V / Ctrl+A  Cut / Copy / Paste / Select all\r\n  (Paste auto-converts Python dicts to JSON)\r\n  Ctrl+K  Clear    Ctrl+O  Open    Ctrl+S  Save\r\n  Ctrl+Alt+C  Copy as Python dictionary\r\n\r\nSearch:\r\n  Ctrl+F  Focus search    Enter  Next    Shift+Enter  Previous\r\n  Ctrl+G / Ctrl+Shift+G  Next / Previous match\r\n  Esc  Clear search");
+        "General:\r\n  Ctrl+,  Settings\r\n  Ctrl+1/2/3  Viewer / Text / Split tabs\r\n\r\nTree Viewer:\r\n  Ctrl+E  Expand all    Ctrl+Shift+E  Collapse all\r\n  Ctrl+Alt+P  Toggle properties panel\r\n  Click node to inspect - double-click grid row to jump\r\n  Right-click node for copy / expand menu\r\n  Double-click a long value to expand it inline below the tree\r\n\r\nEditor:\r\n  Ctrl+X / Ctrl+C / Ctrl+V / Ctrl+A  Cut / Copy / Paste / Select all\r\n  (Paste auto-converts Python dicts to JSON)\r\n  Ctrl+K  Clear    Ctrl+O  Open    Ctrl+S  Save\r\n  Ctrl+Alt+C  Copy as Python dictionary\r\n\r\nSearch:\r\n  Ctrl+F  Focus search    Enter  Next    Shift+Enter  Previous\r\n  Ctrl+G / Ctrl+Shift+G  Next / Previous match\r\n  Esc  Clear search");
 }
 
 fn show_about(hwnd: HWND) {
@@ -1240,6 +1435,10 @@ fn layout(app: &App) {
                 show(app.ctrl.editor, true);
                 show(app.ctrl.tree, false);
                 show(app.ctrl.grid, false);
+                show(app.ctrl.expand_label, false);
+                show(app.ctrl.expand_text, false);
+                show(app.ctrl.expand_copy, false);
+                show(app.ctrl.expand_collapse, false);
                 let _ = SetWindowPos(app.ctrl.editor, HWND(std::ptr::null_mut()), 8, content_y, w - 16, content_h, SWP_NOZORDER);
             }
             AppTab::Viewer => {
@@ -1247,12 +1446,41 @@ fn layout(app: &App) {
                 show(app.ctrl.tree, true);
                 let grid_on = app.props_visible;
                 show(app.ctrl.grid, grid_on);
+                let expand_on = expand_should_show(app);
+                // Inline panel height: ~35% of content, clamped — like the mac
+                // full-width box (large enough to read, small enough to keep
+                // tree context). Guarded so tiny windows can't get negative sizes.
+                let expand_h = if expand_on {
+                    (((content_h * 35) / 100).clamp(120, 260)).min((content_h - 80).max(80))
+                } else {
+                    0
+                };
+                let tree_h = if expand_on { (content_h - expand_h - 8).max(60) } else { content_h };
+                // Helper lays out tree + expand panel inside [x, x+tree_w).
+                let place_tree_with_expand = |tree_x: i32, tree_w: i32| {
+                    let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), tree_x, content_y, tree_w, tree_h, SWP_NOZORDER);
+                    show(app.ctrl.expand_label, expand_on);
+                    show(app.ctrl.expand_text, expand_on);
+                    show(app.ctrl.expand_copy, expand_on);
+                    show(app.ctrl.expand_collapse, expand_on);
+                    if expand_on {
+                        let ey = content_y + tree_h + 8;
+                        // Header: label left, Copy + Collapse right-aligned.
+                        let copy_w = 70;
+                        let collapse_w = 80;
+                        let label_w = (tree_w - copy_w - collapse_w - 16).max(80);
+                        let _ = SetWindowPos(app.ctrl.expand_label, HWND(std::ptr::null_mut()), tree_x, ey, label_w, 24, SWP_NOZORDER);
+                        let _ = SetWindowPos(app.ctrl.expand_copy, HWND(std::ptr::null_mut()), tree_x + label_w + 6, ey, copy_w, 24, SWP_NOZORDER);
+                        let _ = SetWindowPos(app.ctrl.expand_collapse, HWND(std::ptr::null_mut()), tree_x + label_w + 6 + copy_w + 4, ey, collapse_w, 24, SWP_NOZORDER);
+                        let _ = SetWindowPos(app.ctrl.expand_text, HWND(std::ptr::null_mut()), tree_x, ey + 26, tree_w, (expand_h - 28).max(40), SWP_NOZORDER);
+                    }
+                };
                 if grid_on {
                     let tree_w = ((w - 24) * 68) / 100;
-                    let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), 8, content_y, tree_w, content_h, SWP_NOZORDER);
+                    place_tree_with_expand(8, tree_w);
                     let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), 16 + tree_w, content_y, w - 24 - tree_w, content_h, SWP_NOZORDER);
                 } else {
-                    let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), 8, content_y, w - 16, content_h, SWP_NOZORDER);
+                    place_tree_with_expand(8, w - 16);
                 }
             }
             AppTab::Split => {
@@ -1260,16 +1488,40 @@ fn layout(app: &App) {
                 show(app.ctrl.tree, true);
                 let grid_on = app.props_visible;
                 show(app.ctrl.grid, grid_on);
+                let expand_on = expand_should_show(app);
+                let expand_h = if expand_on {
+                    (((content_h * 35) / 100).clamp(120, 260)).min((content_h - 80).max(80))
+                } else {
+                    0
+                };
+                let tree_h = if expand_on { (content_h - expand_h - 8).max(60) } else { content_h };
                 let edit_w = ((w - 24) * 40) / 100;
                 let _ = SetWindowPos(app.ctrl.editor, HWND(std::ptr::null_mut()), 8, content_y, edit_w, content_h, SWP_NOZORDER);
                 let rest_x = 16 + edit_w;
                 let rest_w = w - 8 - rest_x;
+                let place_tree_with_expand = |tree_x: i32, tree_w: i32| {
+                    let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), tree_x, content_y, tree_w, tree_h, SWP_NOZORDER);
+                    show(app.ctrl.expand_label, expand_on);
+                    show(app.ctrl.expand_text, expand_on);
+                    show(app.ctrl.expand_copy, expand_on);
+                    show(app.ctrl.expand_collapse, expand_on);
+                    if expand_on {
+                        let ey = content_y + tree_h + 8;
+                        let copy_w = 70;
+                        let collapse_w = 80;
+                        let label_w = (tree_w - copy_w - collapse_w - 16).max(80);
+                        let _ = SetWindowPos(app.ctrl.expand_label, HWND(std::ptr::null_mut()), tree_x, ey, label_w, 24, SWP_NOZORDER);
+                        let _ = SetWindowPos(app.ctrl.expand_copy, HWND(std::ptr::null_mut()), tree_x + label_w + 6, ey, copy_w, 24, SWP_NOZORDER);
+                        let _ = SetWindowPos(app.ctrl.expand_collapse, HWND(std::ptr::null_mut()), tree_x + label_w + 6 + copy_w + 4, ey, collapse_w, 24, SWP_NOZORDER);
+                        let _ = SetWindowPos(app.ctrl.expand_text, HWND(std::ptr::null_mut()), tree_x, ey + 26, tree_w, (expand_h - 28).max(40), SWP_NOZORDER);
+                    }
+                };
                 if grid_on {
                     let tree_w = (rest_w * 65) / 100;
-                    let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), rest_x, content_y, tree_w, content_h, SWP_NOZORDER);
+                    place_tree_with_expand(rest_x, tree_w);
                     let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), rest_x + tree_w + 8, content_y, rest_w - tree_w - 8, content_h, SWP_NOZORDER);
                 } else {
-                    let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), rest_x, content_y, rest_w, content_h, SWP_NOZORDER);
+                    place_tree_with_expand(rest_x, rest_w);
                 }
             }
         }
@@ -1445,6 +1697,7 @@ extern "system" fn search_edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                         // the borrow across SendMessage.
                         let se = app.ctrl.search_edit;
                         app.model.clear_search();
+                        clear_search_marks_and_repaint(app);
                         set_window_text(se, "");
                         refresh_status(app);
                     }
@@ -1549,6 +1802,26 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 cd.clrTextBk = COLORREF(DARK_ACCENT_BG);
                                 return LRESULT(CDRF_NEWFONT as isize);
                             }
+                            // Search highlight (mac MATCH parity). Two layers:
+                            // 1. The model-selected path always gets the brown
+                            //    selection background — even if the TreeView
+                            //    caret itself didn't follow (stale caret after
+                            //    chunked fills / programmatic jumps). This is
+                            //    what makes search land visibly "like manual".
+                            // 2. Other matches get bright yellow text.
+                            let item = cd.nmcd.dwItemSpec as isize;
+                            if let Some(path) = app.item_to_path.get(&item) {
+                                if app.model.selected_path.as_ref() == Some(path) {
+                                    cd.clrText = COLORREF(DARK_TEXT);
+                                    cd.clrTextBk = COLORREF(DARK_ACCENT_BG);
+                                    return LRESULT(CDRF_NEWFONT as isize);
+                                }
+                                if app.search_marks.contains(path) {
+                                    cd.clrText = COLORREF(SEARCH_MATCH_TEXT);
+                                    cd.clrTextBk = COLORREF(DARK_EDIT_BG);
+                                    return LRESULT(CDRF_NEWFONT as isize);
+                                }
+                            }
                             return LRESULT(CDRF_DODEFAULT as isize);
                         }
                         return LRESULT(CDRF_DODEFAULT as isize);
@@ -1559,7 +1832,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         if let Some(path) = app.item_to_path.get(&item).cloned() {
                             app.model.selected_path = Some(path);
                             refresh_grid(app);
+                            refresh_expand_panel(app);
                             refresh_status(app);
+                            layout(app);
                         }
                         return LRESULT(0);
                     }
@@ -1594,23 +1869,27 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                     );
                                     app.syncing_grid = false;
                                 }
+                                refresh_expand_panel(app);
                                 refresh_status(app);
+                                layout(app);
+                                ensure_selected_visible(app);
                             }
                         }
                         return LRESULT(0);
                     }
-                    // Double-click a tree leaf with long text opens the Expand
-                    // dialog (mac parity with the inline [expand] view).
+                    // Double-click a tree leaf with long text toggles the inline
+                    // expand panel below the tree (macOS inline parity — no popup).
                     if hdr.hwndFrom == app.ctrl.tree && hdr.code == windows::Win32::UI::Controls::NM_DBLCLK {
                         let caret = send(app.ctrl.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0);
                         if caret != 0 {
                             if let Some(path) = app.item_to_path.get(&(caret as isize)).cloned() {
                                 if let Some(n) = app.model.find_node(&path) {
-                                    if let crate::json::JSONValue::Str(s) = &n.value {
+                                    if let crate::json::JSONValue::Str(_) = &n.value {
                                         if n.is_long_text() {
-                                            let key = n.key.clone();
-                                            let full = s.clone();
-                                            value_dialog::open_value_dialog(&key, &full);
+                                            app.model.selected_path = Some(path.clone());
+                                            refresh_grid(app);
+                                            refresh_status(app);
+                                            toggle_expand_inline(app, path);
                                         }
                                     }
                                 }
@@ -1618,10 +1897,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         }
                         return LRESULT(0);
                     }
-                    // Double-click a grid row: long values (e.g. big "bio"
-                    // strings, truncated to "… (N chars)" in the cell) open
-                    // the full-text Expand dialog; normal rows jump to the
-                    // tree node (parity with macOS click-to-jump).
+                    // Double-click a grid row: long values expand inline below
+                    // the tree; normal rows jump to the tree node
+                    // (parity with macOS click-to-jump).
                     if hdr.hwndFrom == app.ctrl.grid && hdr.code == windows::Win32::UI::Controls::NM_DBLCLK {
                         // Use the clicked row from NMITEMACTIVATE, not the
                         // current selection: single-click rebuilds the grid
@@ -1635,9 +1913,11 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 if let Some(n) = app.model.find_node(&row.path) {
                                     if let crate::json::JSONValue::Str(s) = &n.value {
                                         if n.is_long_text() || s.chars().count() > 200 {
-                                            let key = n.key.clone();
-                                            let full = s.clone();
-                                            value_dialog::open_value_dialog(&key, &full);
+                                            app.model.selected_path = Some(row.path.clone());
+                                            reveal_path(app, &row.path, true);
+                                            refresh_grid(app);
+                                            refresh_status(app);
+                                            show_expand_inline(app, row.path.clone());
                                             expanded = true;
                                         }
                                     }
@@ -1645,7 +1925,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 if !expanded {
                                     // Focus the tree after jumping.
                                     reveal_path(app, &row.path, true);
+                                    refresh_expand_panel(app);
+                                    refresh_status(app);
+                                    layout(app);
+                                    ensure_selected_visible(app);
                                     let _ = SetFocus(app.ctrl.tree);
+                                } else {
+                                    // show_expand_inline already laid out; make
+                                    // sure the just-expanded node stays in view.
+                                    ensure_selected_visible(app);
                                 }
                             }
                         }
@@ -1844,7 +2132,7 @@ fn show_copy_menu(app: &App) {
 }
 
 /// Right-click menu on a tree node (mac parity: Expand/Collapse, Copy Value,
-/// Copy Key, Copy Path, Copy Subtree, Copy as Python, Expand Full Text).
+/// Copy Key, Copy Path, Copy Subtree, Copy as Python, Expand Full Text inline).
 fn show_tree_context_menu(app: &mut App, lparam: isize) {
     unsafe {
         let tree = app.ctrl.tree;
@@ -1881,7 +2169,9 @@ fn show_tree_context_menu(app: &mut App, lparam: isize) {
         send(tree, TVM_SELECTITEM, TVGN_CARET as usize, item);
         app.model.selected_path = Some(path.clone());
         refresh_grid(app);
+        refresh_expand_panel(app);
         refresh_status(app);
+        layout(app);
         app.ctx_path = Some(path.clone());
 
         let is_container = app
@@ -1905,7 +2195,13 @@ fn show_tree_context_menu(app: &mut App, lparam: isize) {
             entries.push((IDM_CTX_COLLAPSE, "Collapse"));
             entries.push((0, ""));
         } else if is_long {
-            entries.push((IDM_CTX_EXPAND_TEXT, "Expand Full Text…"));
+            // Inline (no "…" — no separate dialog opens anymore).
+            let label = if app.expand_visible && app.expand_path.as_ref() == Some(&path) {
+                "Collapse Full Text"
+            } else {
+                "Expand Full Text"
+            };
+            entries.push((IDM_CTX_EXPAND_TEXT, label));
             entries.push((0, ""));
         }
         entries.push((IDM_CTX_COPY_VALUE, "Copy Value"));
@@ -1975,7 +2271,7 @@ fn ctx_copy(app: &mut App, kind: &str) {
     }
 }
 
-/// The edit control with keyboard focus, if any.
+/// The edit control with keyboard focus, if any (typing targets).
 fn focused_edit(app: &App) -> Option<HWND> {
     unsafe {
         let f = GetFocus();
@@ -1987,11 +2283,25 @@ fn focused_edit(app: &App) -> Option<HWND> {
     }
 }
 
+/// Copy/cut/select-all targets: typing edits plus the read-only inline
+/// expand viewer (so Ctrl+C copies the selection there natively instead of
+/// firing the global subtree copy).
+fn focused_copyable_edit(app: &App) -> Option<HWND> {
+    unsafe {
+        let f = GetFocus();
+        if f == app.ctrl.editor || f == app.ctrl.search_edit || f == app.ctrl.expand_text {
+            Some(f)
+        } else {
+            None
+        }
+    }
+}
+
 /// Ctrl+C: native selection copy inside edits; subtree copy on the tree;
 /// selected grid rows on the grid; full text everywhere else.
 fn accel_copy(app: &mut App) {
     unsafe {
-        if let Some(f) = focused_edit(app) {
+        if let Some(f) = focused_copyable_edit(app) {
             let _ = SendMessageW(f, WM_COPY, WPARAM(0), LPARAM(0));
             return;
         }
@@ -2031,6 +2341,12 @@ fn accel_copy(app: &mut App) {
 /// auto-converted, like the mac app); the Paste-button behavior elsewhere.
 fn accel_paste(app: &mut App) {
     unsafe {
+        // Read-only inline viewer: fall through to global paste (replace
+        // document), like tree/grid focus — never EM_REPLACESEL into it.
+        if GetFocus() == app.ctrl.expand_text {
+            do_paste(app);
+            return;
+        }
         if let Some(f) = focused_edit(app) {
             if f == app.ctrl.search_edit {
                 let _ = SendMessageW(f, WM_PASTE, WPARAM(0), LPARAM(0));
@@ -2062,7 +2378,7 @@ fn accel_paste(app: &mut App) {
 /// Ctrl+X: native cut inside edits; otherwise behaves like copy.
 fn accel_cut(app: &mut App) {
     unsafe {
-        if let Some(f) = focused_edit(app) {
+        if let Some(f) = focused_copyable_edit(app) {
             let _ = SendMessageW(f, WM_CUT, WPARAM(0), LPARAM(0));
             return;
         }
@@ -2073,7 +2389,7 @@ fn accel_cut(app: &mut App) {
 /// Ctrl+A: select all in edits and the grid.
 fn accel_select_all(app: &mut App) {
     unsafe {
-        if let Some(f) = focused_edit(app) {
+        if let Some(f) = focused_copyable_edit(app) {
             let _ = SendMessageW(f, EM_SETSEL, WPARAM(0), LPARAM(-1));
             return;
         }
@@ -2183,14 +2499,16 @@ fn handle_command(app: &mut App, id: u32) {    match id {
         IDM_CTX_COPY_SUBTREE => ctx_copy(app, "subtree"),
         IDM_CTX_COPY_PYTHON => ctx_copy(app, "python"),
         IDM_CTX_EXPAND_TEXT => {
+            // Inline toggle (macOS parity) — no separate popup window.
             if let Some(p) = app.ctx_path.clone() {
-                if let Some(n) = app.model.find_node(&p) {
-                    if let crate::json::JSONValue::Str(s) = &n.value {
-                        value_dialog::open_value_dialog(&n.key, s);
-                    }
-                }
+                app.model.selected_path = Some(p.clone());
+                refresh_grid(app);
+                refresh_status(app);
+                toggle_expand_inline(app, p);
             }
         }
+        IDC_EXPAND_COPY => copy_expand_text(app),
+        IDC_EXPAND_COLLAPSE => hide_expand_inline(app),
         IDM_EXIT => unsafe {
             let _ = DestroyWindow(app.hwnd);
         },
@@ -2305,6 +2623,22 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
             set_font(h, font_ui);
         }
 
+        // Inline expand panel (macOS expanded big-text parity): docked below
+        // the tree, inside the main window — no separate popup.
+        // Word-wrap ON (no WS_HSCROLL / ES_AUTOHSCROLL) so long lines wrap
+        // like the mac full-width textarea. Read-only + selectable.
+        let expand_label = make_static(hwnd, "", IDC_EXPAND_LABEL, instance, SS_CENTERIMAGE);
+        let expand_text = create_child(hwnd, &edit_class(), "", IDC_EXPAND_TEXT,
+            WS_CHILD_VISIBLE | WS_TABSTOP.0 | WS_BORDER.0 | WS_VSCROLL.0
+                | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32 | ES_READONLY as u32,
+            0, instance);
+        let expand_copy = make_button(hwnd, "Copy", IDC_EXPAND_COPY, instance);
+        let expand_collapse = make_button(hwnd, "Collapse", IDC_EXPAND_COLLAPSE, instance);
+        for h in [expand_label, expand_copy, expand_collapse] {
+            set_font(h, font_ui);
+        }
+        set_font(expand_text, font_mono);
+
         let status = make_static(hwnd, "Ready", IDC_STATUS, instance, SS_CENTERIMAGE);
         let path = make_static(hwnd, "$", IDC_PATH, instance, SS_CENTERIMAGE);
 
@@ -2321,6 +2655,7 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
             ctrl: Controls {
                 row_tabs, row_utils, row_text, row_viewer,
                 editor, tree, grid,
+                expand_label, expand_text, expand_copy, expand_collapse,
                 search_label, search_edit, search_go, search_prev, search_next, search_status,
                 status, path,
             },
@@ -2342,6 +2677,9 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
             tree_complete: false,
             expand_on_fill_done: false,
             ctx_path: None,
+            expand_visible: false,
+            expand_path: None,
+            search_marks: HashSet::new(),
         });
 
         if current.wrap_lines {
@@ -2356,6 +2694,8 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
         // limit is 32KB of typed text — without this, typing/pasting a 5MB
         // file is silently truncated and the keyboard appears "stuck".
         send(editor, EM_SETLIMITTEXT, EDIT_TEXT_LIMIT, 0);
+        // Same for the inline expand viewer (values can be multi-KB).
+        send(expand_text, EM_SETLIMITTEXT, EDIT_TEXT_LIMIT, 0);
 
         apply_font_to_controls(&app);
         apply_dark_theme_to_views(&app);
@@ -2483,6 +2823,7 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 let search_edit = app.ctrl.search_edit;
                 let tree = app.ctrl.tree;
                 let grid = app.ctrl.grid;
+                let expand_text = app.ctrl.expand_text;
                 let search_go = app.ctrl.search_go;
                 let search_prev = app.ctrl.search_prev;
                 let search_next = app.ctrl.search_next;
@@ -2490,6 +2831,8 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 let search_visible = !matches!(app.model.active_tab, AppTab::Text);
                 let search_active = !app.model.search_query.is_empty()
                     || !app.model.search_results.is_empty();
+                // Typing targets: plain '/' / '?' must reach them as text.
+                let typing = focus == editor || focus == search_edit;
                 // Borrow ends here (all copies).
                 if msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN {
                     let vk = (msg.wParam.0 & 0xffff) as u32;
@@ -2500,10 +2843,12 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                     // (plain EDIT has no code-editor Tab support).
                     if vk == 0x09 && focus == editor && !ctrl_down && !alt_down {
                         LoopAction::TabIndent { editor, indent }
-                    } else if vk == 0x1B && !ctrl_down && !alt_down && focus == search_edit {
-                        // Escape clears the search right from the box. (The
-                        // subclass handles it too as a backup; handling it
-                        // here doesn't depend on subclass dispatch.)
+                    } else if vk == 0x1B && !ctrl_down && !alt_down
+                        && (focus == search_edit || ((focus == tree || focus == grid || focus == expand_text) && search_visible))
+                    {
+                        // Escape clears the search from the box itself, and
+                        // also when viewing results (tree/grid/expand focus).
+                        // (The subclass handles the box too as a backup.)
                         LoopAction::ClearSearch
                     } else if vk == 0x0D && !ctrl_down && !alt_down && search_visible {
                         // Enter in the search box itself: next / Shift+Enter =
@@ -2525,7 +2870,7 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                             LoopAction::SearchAdvance { dir: -1 }
                         } else if focus == search_next {
                             LoopAction::SearchAdvance { dir: 1 }
-                        } else if (focus == tree || focus == grid) && search_active {
+                        } else if (focus == tree || focus == grid || focus == expand_text) && search_active {
                             LoopAction::SearchAdvance {
                                 dir: if shift_down { -1 } else { 1 },
                             }
@@ -2534,20 +2879,26 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                         }
                     } else if ctrl_down
                         && !alt_down
-                        && (focus == editor || focus == search_edit)
+                        && (focus == editor || focus == search_edit || focus == expand_text)
                         && (vk == 0x43 || vk == 0x58)
                     {
-                        // Let plain EDIT handle Ctrl+C / Ctrl+X natively.
+                        // Let plain EDIT handle Ctrl+C / Ctrl+X natively
+                        // (expand_text is read-only but selection copy/select
+                        // must still come from the control itself).
                         LoopAction::SkipAccelerator
                     } else {
                         LoopAction::None
                     }
                 } else if msg.message == WM_CHAR {
                     let ch = (msg.wParam.0 & 0xffff) as u32;
-                    // Quick keys only when NOT typing: tree/grid focus.
-                    // (Main-window WM_CHAR covers button focus as fallback.)
-                    if (ch == '/' as u32 || ch == '?' as u32)
-                        && (focus == tree || focus == grid)
+                    // Quick keys whenever NOT typing: tree/grid/expand/buttons.
+                    // Must live in the message loop (not just wnd_proc WM_CHAR)
+                    // because WM_CHAR addressed to a focused button/tree/grid
+                    // never reaches the main window proc — without this, '/'
+                    // silently did nothing after clicking any toolbar button.
+                    // Works in every tab: '/' in Text tab switches to Split
+                    // first (see FocusSearch), '?' always shows cheatsheet.
+                    if (ch == '/' as u32 || ch == '?' as u32) && !typing
                     {
                         if ch == '/' as u32 {
                             LoopAction::FocusSearch
@@ -2597,6 +2948,7 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                     if let Some(app) = app_of(hwnd) {
                         let se = app.ctrl.search_edit;
                         app.model.clear_search();
+                        clear_search_marks_and_repaint(app);
                         set_window_text(se, "");
                         refresh_status(app);
                     }

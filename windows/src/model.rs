@@ -96,7 +96,7 @@ impl Node {
         }
     }
 
-    /// Full-length leaf text (for the Expand dialog / copy actions).
+    /// Full-length leaf text (for the inline expand panel / copy actions).
     pub fn is_long_text(&self) -> bool {
         match &self.value {
             JSONValue::Str(s) => s.chars().count() > 160 || s.contains('\n'),

@@ -8,7 +8,6 @@ mod python;
 mod settings;
 mod settings_dialog;
 mod util;
-mod value_dialog;
 
 use std::sync::{Arc, Mutex};
 

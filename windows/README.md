@@ -42,9 +42,12 @@ windows/
   container badges, `key : value` leaf rows (long text truncated like the mac
   collapsed rows), expand/collapse (all or per node), selection sync, and the
   selected JSON path in the bottom bar.
-- **Expand long text** — double-click a truncated value, or right-click →
-  *Expand Full Text…*, to open the complete wrapped text with character count
-  and Copy (the Windows equivalent of the mac inline `[expand]` view).
+- **Expand long text (macOS parity, inline — no popup)** — selecting a
+  long string auto-expands it in a full-width wrapped panel docked below
+  the tree (same tab, same window), with `key • N chars` header, Copy,
+  and Collapse — the Windows equivalent of the mac inline `[expand]` /
+  full-width textarea. Double-click a truncated value, or right-click →
+  *Expand Full Text*, to show it; *Collapse* (or double-click again) hides it.
 - **Right-click any tree node** — *Expand All Sub-levels*, *Collapse*,
   *Copy Value*, *Copy Key*, *Copy JSON Path*, *Copy Subtree as JSON*,
   *Copy as Python Dictionary*.
