@@ -38,7 +38,7 @@ use windows::Win32::UI::Controls::{
     TVM_SETTEXTCOLOR, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVIF_TEXT, TVI_LAST, TVI_ROOT,
     TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES,
     TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_LISTVIEW, WC_TREEVIEW, LVN_ITEMCHANGED, NM_CLICK,
-    TVN_SELCHANGEDW, NMTREEVIEWW,
+    TVN_SELCHANGEDW, NMTREEVIEWW, NMITEMACTIVATE,
 };
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST,
@@ -253,6 +253,10 @@ struct App {
     grid_rows: Vec<PropertyRow>,
     grid_truncated: Option<usize>,
     syncing_editor: bool,
+    /// True while we (not the user) change grid selection — stops the
+    /// resulting LVN_ITEMCHANGED from re-entering the click handler and
+    /// rebuilding the grid in an infinite loop.
+    syncing_grid: bool,
     props_visible: bool,
     search_orig_proc: isize,
     /// In-progress chunked tree fill (None when idle).
@@ -1121,6 +1125,17 @@ fn set_tab(app: &mut App, tab: AppTab) {
     }
     app.model.active_tab = tab;
     layout(app);
+    // Repaint the tab buttons: owner-drawn highlight reads `active_tab` at
+    // WM_DRAWITEM time, and moving/resizing alone doesn't always invalidate
+    // them — without this the old tab keeps its accent (several tabs look
+    // "selected" at once).
+    unsafe {
+        for item in app.ctrl.row_tabs.iter() {
+            if !item.hwnd.is_invalid() {
+                let _ = InvalidateRect(item.hwnd, None, BOOL(1));
+            }
+        }
+    }
 }
 
 fn do_zoom(app: &mut App, delta: i32) {
@@ -1232,7 +1247,7 @@ fn layout(app: &App) {
                 let grid_on = app.props_visible;
                 show(app.ctrl.grid, grid_on);
                 if grid_on {
-                    let tree_w = ((w - 24) * 60) / 100;
+                    let tree_w = ((w - 24) * 68) / 100;
                     let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), 8, content_y, tree_w, content_h, SWP_NOZORDER);
                     let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), 16 + tree_w, content_y, w - 24 - tree_w, content_h, SWP_NOZORDER);
                 } else {
@@ -1249,7 +1264,7 @@ fn layout(app: &App) {
                 let rest_x = 16 + edit_w;
                 let rest_w = w - 8 - rest_x;
                 if grid_on {
-                    let tree_w = (rest_w * 60) / 100;
+                    let tree_w = (rest_w * 65) / 100;
                     let _ = SetWindowPos(app.ctrl.tree, HWND(std::ptr::null_mut()), rest_x, content_y, tree_w, content_h, SWP_NOZORDER);
                     let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), rest_x + tree_w + 8, content_y, rest_w - tree_w - 8, content_h, SWP_NOZORDER);
                 } else {
@@ -1528,6 +1543,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         return LRESULT(0);
                     }
                     if hdr.hwndFrom == app.ctrl.grid && (hdr.code == LVN_ITEMCHANGED || hdr.code == NM_CLICK) {
+                        if app.syncing_grid {
+                            return LRESULT(0);
+                        }
                         let idx = send(app.ctrl.grid, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize) as i32;
                         if idx >= 0 {
                             if let Some(row) = app.grid_rows.get(idx as usize) {
@@ -1535,6 +1553,26 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 app.model.selected_path = Some(target.clone());
                                 reveal_path(app, &target, true);
                                 refresh_grid(app);
+                                // Rebuilding deletes/recreates every row, which
+                                // drops the selection — and a lost selection is
+                                // what broke double-click-to-expand (the second
+                                // click landed on a selection-less list, so the
+                                // expand lookup found nothing). Restore it.
+                                if let Some(pos) =
+                                    app.grid_rows.iter().position(|r| r.path == target)
+                                {
+                                    let mut lv = LVITEMW::default();
+                                    lv.state = LVIS_SELECTED;
+                                    lv.stateMask = LVIS_SELECTED;
+                                    app.syncing_grid = true;
+                                    send(
+                                        app.ctrl.grid,
+                                        LVM_SETITEMSTATE,
+                                        pos,
+                                        &lv as *const _ as isize,
+                                    );
+                                    app.syncing_grid = false;
+                                }
                                 refresh_status(app);
                             }
                         }
@@ -1564,7 +1602,12 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     // the full-text Expand dialog; normal rows jump to the
                     // tree node (parity with macOS click-to-jump).
                     if hdr.hwndFrom == app.ctrl.grid && hdr.code == windows::Win32::UI::Controls::NM_DBLCLK {
-                        let idx = send(app.ctrl.grid, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize) as i32;
+                        // Use the clicked row from NMITEMACTIVATE, not the
+                        // current selection: single-click rebuilds the grid
+                        // (dropping selection), so GETNEXTITEM is unreliable
+                        // here — this is why Expand previously never opened.
+                        let nm = &*(lparam.0 as *const NMITEMACTIVATE);
+                        let idx = nm.iItem;
                         if idx >= 0 {
                             if let Some(row) = app.grid_rows.get(idx as usize).cloned() {
                                 let mut expanded = false;
@@ -2270,6 +2313,7 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
             grid_rows: Vec::new(),
             grid_truncated: None,
             syncing_editor: false,
+            syncing_grid: false,
             props_visible: true,
             search_orig_proc: 0,
             fill: None,
@@ -2393,6 +2437,9 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 TabIndent { editor: HWND, indent: i32 },
                 FocusSearch,
                 ShowShortcuts,
+                /// Run search: 0 = fresh GO, 1 = next, -1 = previous
+                /// (mac parity: Enter = next, Shift+Enter = previous).
+                SearchAdvance { dir: i32 },
             }
             let action: LoopAction = {
                 let app = match app_of(hwnd) {
@@ -2413,16 +2460,44 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 let search_edit = app.ctrl.search_edit;
                 let tree = app.ctrl.tree;
                 let grid = app.ctrl.grid;
+                let search_go = app.ctrl.search_go;
+                let search_prev = app.ctrl.search_prev;
+                let search_next = app.ctrl.search_next;
                 let indent = app.settings.lock().unwrap().indent_spaces;
+                let search_visible = !matches!(app.model.active_tab, AppTab::Text);
+                let search_active = !app.model.search_query.is_empty()
+                    || !app.model.search_results.is_empty();
                 // Borrow ends here (all copies).
                 if msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN {
                     let vk = (msg.wParam.0 & 0xffff) as u32;
                     let ctrl_down = GetKeyState(0x11) < 0;
                     let alt_down = GetKeyState(0x12) < 0;
+                    let shift_down = GetKeyState(0x10) < 0;
                     // Tab in the code editor inserts the configured indent
                     // (plain EDIT has no code-editor Tab support).
                     if vk == 0x09 && focus == editor && !ctrl_down && !alt_down {
                         LoopAction::TabIndent { editor, indent }
+                    } else if vk == 0x0D && !ctrl_down && !alt_down && search_visible {
+                        // Plain Enter drives search from anywhere except the
+                        // search box itself (its subclass handles Enter as
+                        // next/previous). Owner-drawn buttons don't activate
+                        // on Enter by themselves, and the tree eats it — so
+                        // without this, Enter only worked after clicking GO.
+                        if focus == search_edit {
+                            LoopAction::None
+                        } else if focus == search_go {
+                            LoopAction::SearchAdvance { dir: 0 }
+                        } else if focus == search_prev {
+                            LoopAction::SearchAdvance { dir: -1 }
+                        } else if focus == search_next {
+                            LoopAction::SearchAdvance { dir: 1 }
+                        } else if (focus == tree || focus == grid) && search_active {
+                            LoopAction::SearchAdvance {
+                                dir: if shift_down { -1 } else { 1 },
+                            }
+                        } else {
+                            LoopAction::None
+                        }
                     } else if ctrl_down
                         && !alt_down
                         && (focus == editor || focus == search_edit)
@@ -2478,6 +2553,11 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 }
                 LoopAction::ShowShortcuts => {
                     show_shortcuts(hwnd);
+                }
+                LoopAction::SearchAdvance { dir } => {
+                    if let Some(app) = app_of(hwnd) {
+                        do_search(app, dir);
+                    }
                 }
                 LoopAction::SkipAccelerator => {
                     let _ = TranslateMessage(&msg);
