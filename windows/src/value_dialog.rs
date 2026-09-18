@@ -6,7 +6,7 @@
 //! dialog, like the native file pickers.
 
 use crate::clipboard;
-use crate::util::{get_window_text, set_window_text, wide};
+use crate::util::{get_window_text, normalize_newlines, set_editor_text, wide};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, RegisterClassW,
@@ -70,7 +70,7 @@ extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let _ = DestroyWindow(hwnd);
                 return LRESULT(0);
             } else if id == IDC_COPY && !ptr.is_null() {
-                let text = get_window_text((*ptr).text_hwnd);
+                let text = normalize_newlines(&get_window_text((*ptr).text_hwnd));
                 if clipboard::set_text(&text) {
                     let note = wide("Copied to clipboard!");
                     let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
@@ -198,7 +198,8 @@ pub fn open_value_dialog(key: &str, value: &str) {
         );
         // Word-wrap ON (no horizontal scroll style adjustments needed beyond
         // omitting WS_HSCROLL): long lines wrap instead of scrolling.
-        set_window_text(text_hwnd, value);
+        // CRLF: bare LF would render multi-line values as one line.
+        set_editor_text(text_hwnd, value);
 
         let _ = make_child(hwnd, "BUTTON", "Copy", IDC_COPY, 400, 402, 100, 28,
             WINDOW_STYLE(BS_PUSHBUTTON as u32), instance);

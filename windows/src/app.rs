@@ -9,7 +9,7 @@ use crate::model::{flatten, AppTab, DocumentModel, FlatRow, PropertyRow};
 use crate::python::parse_python_literal;
 use crate::settings::{Settings, SettingsStore};
 use crate::settings_dialog::{self, SettingsContext};
-use crate::util::{get_edit_text, get_window_text, set_window_text, wide};
+use crate::util::{get_edit_text, get_window_text, set_editor_text, set_window_text, wide};
 use crate::value_dialog;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -38,7 +38,9 @@ use windows::Win32::UI::Controls::{
     TVM_SETTEXTCOLOR, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVIF_TEXT, TVI_LAST, TVI_ROOT,
     TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES,
     TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_LISTVIEW, WC_TREEVIEW, LVN_ITEMCHANGED, NM_CLICK,
-    TVN_SELCHANGEDW, NMTREEVIEWW, NMITEMACTIVATE,
+    TVN_SELCHANGEDW, NMTREEVIEWW, NMITEMACTIVATE, NM_CUSTOMDRAW, NMTVCUSTOMDRAW,
+    CDDS_PREPAINT, CDDS_ITEMPREPAINT, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW,
+    CDIS_SELECTED,
 };
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST,
@@ -813,8 +815,7 @@ fn refresh_grid(app: &mut App) {
 
 /// Size the 3 grid columns to exactly fill the grid client width, so no
 /// phantom blank 4th column/empty header space shows on the right.
-/// Split: Property 32% / Value 48% / Type rest (Property widened, Value
-/// narrowed per feedback).
+/// Split: Property 36% / Value 44% / Type rest.
 fn resize_grid_columns(app: &App) {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -826,8 +827,8 @@ fn resize_grid_columns(app: &App) {
         if w <= 60 {
             return;
         }
-        let prop = (w * 32 / 100).max(120);
-        let val = (w * 48 / 100).max(140);
+        let prop = (w * 36 / 100).max(120);
+        let val = (w * 44 / 100).max(120);
         let typ = (w - prop - val).max(70);
         send(app.ctrl.grid, LVM_SETCOLUMNWIDTH, 0, prop as isize);
         send(app.ctrl.grid, LVM_SETCOLUMNWIDTH, 1, val as isize);
@@ -851,7 +852,7 @@ fn refresh_status(app: &App) {
 fn refresh_editor(app: &mut App) {
     unsafe {
         app.syncing_editor = true;
-        set_window_text(app.ctrl.editor, &app.model.raw_text);
+        set_editor_text(app.ctrl.editor, &app.model.raw_text);
         app.syncing_editor = false;
     }
 }
@@ -1532,6 +1533,26 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             WM_NOTIFY => {
                 if let Some(app) = app_of(hwnd) {
                     let hdr = &*(lparam.0 as *const windows::Win32::UI::Controls::NMHDR);
+                    // Dark-theme selection for the tree: paint the selected
+                    // row (current search match / inspected node) with the
+                    // accent background in every state — focused or not — so
+                    // the active match stays visibly highlighted while the
+                    // search box has focus. Without this the selection uses
+                    // the system white wash (or vanishes unfocused).
+                    if hdr.hwndFrom == app.ctrl.tree && hdr.code == NM_CUSTOMDRAW {
+                        let cd = &mut *(lparam.0 as *mut NMTVCUSTOMDRAW);
+                        if cd.nmcd.dwDrawStage == CDDS_PREPAINT {
+                            return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
+                        } else if cd.nmcd.dwDrawStage == CDDS_ITEMPREPAINT {
+                            if (cd.nmcd.uItemState.0 & CDIS_SELECTED.0) != 0 {
+                                cd.clrText = COLORREF(DARK_TEXT);
+                                cd.clrTextBk = COLORREF(DARK_ACCENT_BG);
+                                return LRESULT(CDRF_NEWFONT as isize);
+                            }
+                            return LRESULT(CDRF_DODEFAULT as isize);
+                        }
+                        return LRESULT(CDRF_DODEFAULT as isize);
+                    }
                     if hdr.hwndFrom == app.ctrl.tree && hdr.code == TVN_SELCHANGEDW {
                         let info = &*(lparam.0 as *const NMTREEVIEWW);
                         let item = info.itemNew.hItem.0 as isize;
@@ -2440,6 +2461,8 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 /// Run search: 0 = fresh GO, 1 = next, -1 = previous
                 /// (mac parity: Enter = next, Shift+Enter = previous).
                 SearchAdvance { dir: i32 },
+                /// Clear the search box + results (Escape in search box).
+                ClearSearch,
             }
             let action: LoopAction = {
                 let app = match app_of(hwnd) {
@@ -2477,14 +2500,25 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                     // (plain EDIT has no code-editor Tab support).
                     if vk == 0x09 && focus == editor && !ctrl_down && !alt_down {
                         LoopAction::TabIndent { editor, indent }
+                    } else if vk == 0x1B && !ctrl_down && !alt_down && focus == search_edit {
+                        // Escape clears the search right from the box. (The
+                        // subclass handles it too as a backup; handling it
+                        // here doesn't depend on subclass dispatch.)
+                        LoopAction::ClearSearch
                     } else if vk == 0x0D && !ctrl_down && !alt_down && search_visible {
-                        // Plain Enter drives search from anywhere except the
-                        // search box itself (its subclass handles Enter as
-                        // next/previous). Owner-drawn buttons don't activate
-                        // on Enter by themselves, and the tree eats it — so
-                        // without this, Enter only worked after clicking GO.
+                        // Enter in the search box itself: next / Shift+Enter =
+                        // previous (mac parity). Handled here rather than only
+                        // in the subclass so it can't get lost in EDIT
+                        // dispatch.
+                        // Plain Enter also drives search from the GO/Previous/
+                        // Next buttons (owner-drawn buttons don't activate on
+                        // Enter by themselves) and from the tree/grid (which
+                        // eats it) — otherwise Enter only worked after
+                        // clicking GO.
                         if focus == search_edit {
-                            LoopAction::None
+                            LoopAction::SearchAdvance {
+                                dir: if shift_down { -1 } else { 1 },
+                            }
                         } else if focus == search_go {
                             LoopAction::SearchAdvance { dir: 0 }
                         } else if focus == search_prev {
@@ -2557,6 +2591,14 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 LoopAction::SearchAdvance { dir } => {
                     if let Some(app) = app_of(hwnd) {
                         do_search(app, dir);
+                    }
+                }
+                LoopAction::ClearSearch => {
+                    if let Some(app) = app_of(hwnd) {
+                        let se = app.ctrl.search_edit;
+                        app.model.clear_search();
+                        set_window_text(se, "");
+                        refresh_status(app);
                     }
                 }
                 LoopAction::SkipAccelerator => {

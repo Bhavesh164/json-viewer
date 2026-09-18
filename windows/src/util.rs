@@ -31,6 +31,7 @@ pub unsafe fn set_window_text(hwnd: HWND, text: &str) {
 }
 
 /// Read potentially large EDIT control contents without truncation.
+/// Normalizes Windows CRLF (and lone CR) to LF for the model.
 pub unsafe fn get_edit_text(hwnd: HWND) -> String {
     // GetWindowTextLengthW can be unreliable for very large multi-line edits
     // in some configurations; fall back to WM_GETTEXTLENGTH.
@@ -45,5 +46,23 @@ pub unsafe fn get_edit_text(hwnd: HWND) -> String {
     if copied <= 0 {
         return String::new();
     }
-    String::from_utf16_lossy(&buf[..copied as usize])
+    normalize_newlines(&String::from_utf16_lossy(&buf[..copied as usize]))
+}
+
+/// LF -> model form. No-op fast path for text without carriage returns.
+pub fn normalize_newlines(s: &str) -> String {
+    if !s.contains('\r') {
+        return s.to_string();
+    }
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Write model text (LF) into a multiline EDIT control. The native EDIT
+/// control only breaks lines on CRLF — bare `\n` renders as one endless
+/// single line (this is why startup/Format looked "not formatted").
+pub unsafe fn set_editor_text(hwnd: HWND, text: &str) {
+    let normalized = normalize_newlines(text);
+    let with_crlf = normalized.replace('\n', "\r\n");
+    let w = wide(&with_crlf);
+    let _ = SetWindowTextW(hwnd, pcwstr(&w));
 }
