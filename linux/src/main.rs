@@ -20,7 +20,83 @@ Usage:
 Config: $XDG_CONFIG_HOME/JSONViewer/config.json (~/.config/JSONViewer/config.json)
 ";
 
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let msg = format!(
+            "================ JSON VIEWER CRASH REPORT ================\n\
+             Timestamp: {:?}\n\
+             Panic Info: {}\n\
+             Backtrace:\n{}\n\
+             ========================================================\n",
+            std::time::SystemTime::now(),
+            info,
+            backtrace
+        );
+        eprintln!("{}", msg);
+        let _ = std::fs::write("/tmp/jsonviewer_crash.log", &msg);
+        if let Ok(home) = std::env::var("HOME") {
+            let log_dir = std::path::PathBuf::from(home).join(".local/state/jsonviewer");
+            let _ = std::fs::create_dir_all(&log_dir);
+            let _ = std::fs::write(log_dir.join("crash.log"), &msg);
+        }
+    }));
+}
+
+pub fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Candidate monospace fonts (e.g. JetBrainsMono Nerd Font on Arch / Omarchy)
+    let candidate_monos = [
+        "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
+        "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    ];
+
+    // Candidate proportional fonts (e.g. Noto Sans on Arch / Omarchy)
+    let candidate_props = [
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ];
+
+    for path in candidate_monos {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "system_mono".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                family.insert(0, "system_mono".to_owned());
+            }
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.push("system_mono".to_owned());
+            }
+            break;
+        }
+    }
+
+    for path in candidate_props {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "system_prop".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.insert(0, "system_prop".to_owned());
+            }
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 fn main() -> eframe::Result<()> {
+    install_panic_hook();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{}", HELP);
@@ -58,7 +134,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "JSON Viewer",
         options,
-        Box::new(move |_cc| Ok(Box::new(ViewerApp::new(settings, initial)))),
+        Box::new(move |cc| {
+            setup_fonts(&cc.egui_ctx);
+            Ok(Box::new(ViewerApp::new(settings, initial)))
+        }),
     )
 }
 
@@ -157,5 +236,24 @@ mod tests {
         assert!(DESKTOP_ENTRY_STR.contains("Icon=jsonviewer"));
         assert!(DESKTOP_ENTRY_STR.contains("StartupWMClass=jsonviewer"));
         assert!(app_icon().is_some());
+    }
+
+    #[test]
+    fn font_setup_executes_without_panic() {
+        let ctx = egui::Context::default();
+        super::setup_fonts(&ctx);
+    }
+
+    #[test]
+    fn large_array_properties_handled_safely() {
+        let s = Settings::default();
+        let mut m = DocumentModel::new(&s);
+        let items: Vec<String> = (0..1200).map(|i| format!(r#"{{"id":{}}}"#, i)).collect();
+        m.raw_text = format!(r#"[{}]"#, items.join(","));
+        assert!(m.parse_and_build_tree(true, &s));
+        m.selected_path = Some("$".to_string());
+        let (parent, props) = m.properties_for_selected();
+        assert!(parent.is_none());
+        assert_eq!(props.len(), 1200);
     }
 }

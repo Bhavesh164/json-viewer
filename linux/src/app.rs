@@ -286,58 +286,15 @@ impl ViewerApp {
     fn show_main_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // App Title / Branding
-            ui.horizontal(|ui| {
-                ui.strong(egui::RichText::new("{ } JSON Viewer").size(14.0));
-            });
+            ui.strong(egui::RichText::new("{ } JSON Viewer").size(14.0));
 
-            ui.add_space(16.0);
+            ui.add_space(12.0);
 
-            // Centered Segmented Tab Picker (macOS parity)
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add_space((ui.available_width() - 360.0).max(0.0) / 2.0);
-                egui::Frame::group(ui.style())
-                    .fill(ui.visuals().extreme_bg_color)
-                    .corner_radius(6.0)
-                    .inner_margin(egui::Margin::symmetric(3, 3))
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let tabs = [
-                            (AppTab::Viewer, "Viewer"),
-                            (AppTab::Text, "Text"),
-                            (AppTab::Split, "Split"),
-                        ];
-                        for (tab, label) in tabs {
-                            let is_active = self.doc.active_tab == tab;
-                            let btn = egui::Button::new(
-                                egui::RichText::new(label)
-                                    .size(12.0)
-                                    .strong()
-                                    .color(if is_active {
-                                        ui.visuals().strong_text_color()
-                                    } else {
-                                        ui.visuals().text_color()
-                                    }),
-                            )
-                            .fill(if is_active {
-                                ui.visuals().selection.bg_fill
-                            } else {
-                                egui::Color32::TRANSPARENT
-                            })
-                            .corner_radius(4.0)
-                            .min_size(egui::vec2(72.0, 24.0));
-
-                            if ui.add(btn).clicked() {
-                                self.doc.active_tab = tab;
-                            }
-                        }
-                    });
-            });
-
-            // Right-aligned global action icons (macOS toolbar items parity)
+            // Right-aligned global actions first
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Settings
                 if ui
-                    .button(egui::RichText::new("⚙").size(13.0))
+                    .button(egui::RichText::new("Settings").size(11.0))
                     .on_hover_text("Settings (Ctrl+,)")
                     .clicked()
                 {
@@ -346,7 +303,7 @@ impl ViewerApp {
 
                 // Shortcuts
                 if ui
-                    .button(egui::RichText::new("?").size(13.0).strong())
+                    .button(egui::RichText::new("?").size(11.0).strong())
                     .on_hover_text("Keyboard Shortcuts (?)")
                     .clicked()
                 {
@@ -354,10 +311,27 @@ impl ViewerApp {
                 }
 
                 // Find
-                let search_btn = ui
-                    .button(egui::RichText::new("🔍").size(12.0))
-                    .on_hover_text("Toggle & Focus Search Bar (/ or Ctrl+F)");
-                if search_btn.clicked() {
+                let search_active = self.show_search;
+                let search_btn = egui::Button::new(
+                    egui::RichText::new("Find")
+                        .size(11.0)
+                        .strong()
+                        .color(if search_active {
+                            ui.visuals().strong_text_color()
+                        } else {
+                            ui.visuals().text_color()
+                        }),
+                )
+                .fill(if search_active {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                });
+                if ui
+                    .add(search_btn)
+                    .on_hover_text("Toggle & Focus Search Bar (/ or Ctrl+F)")
+                    .clicked()
+                {
                     self.show_search = !self.show_search;
                     if self.show_search {
                         self.focus_search = true;
@@ -366,12 +340,21 @@ impl ViewerApp {
 
                 // Properties Panel Toggle
                 let props_active = self.show_props;
-                let props_btn = egui::Button::new(egui::RichText::new("▤").size(13.0))
-                    .fill(if props_active {
-                        ui.visuals().selection.bg_fill
-                    } else {
-                        ui.visuals().widgets.inactive.bg_fill
-                    });
+                let props_btn = egui::Button::new(
+                    egui::RichText::new("Props")
+                        .size(11.0)
+                        .strong()
+                        .color(if props_active {
+                            ui.visuals().strong_text_color()
+                        } else {
+                            ui.visuals().text_color()
+                        }),
+                )
+                .fill(if props_active {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                });
                 if ui
                     .add(props_btn)
                     .on_hover_text("Toggle Properties Panel (Ctrl+Alt+P)")
@@ -379,6 +362,48 @@ impl ViewerApp {
                 {
                     self.show_props = !self.show_props;
                 }
+
+                ui.separator();
+
+                // Centered Segmented Tab Picker (macOS parity)
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    egui::Frame::group(ui.style())
+                        .fill(ui.visuals().extreme_bg_color)
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(3, 3))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let tabs = [
+                                (AppTab::Viewer, "Viewer"),
+                                (AppTab::Text, "Text"),
+                                (AppTab::Split, "Split"),
+                            ];
+                            for (tab, label) in tabs {
+                                let is_active = self.doc.active_tab == tab;
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(label)
+                                        .size(12.0)
+                                        .strong()
+                                        .color(if is_active {
+                                            ui.visuals().strong_text_color()
+                                        } else {
+                                            ui.visuals().text_color()
+                                        }),
+                                )
+                                .fill(if is_active {
+                                    ui.visuals().selection.bg_fill
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                })
+                                .corner_radius(4.0)
+                                .min_size(egui::vec2(68.0, 22.0));
+
+                                if ui.add(btn).clicked() {
+                                    self.doc.active_tab = tab;
+                                }
+                            }
+                        });
+                });
             });
         });
     }
@@ -386,10 +411,10 @@ impl ViewerApp {
     // MARK: - Viewer Tab Tree Action Bar (matching TreeViewer.swift)
     fn show_tree_toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button(egui::RichText::new("➕ Expand All").size(11.0)).clicked() {
+            if ui.button(egui::RichText::new("[+] Expand All").size(11.0)).clicked() {
                 self.doc.expand_all();
             }
-            if ui.button(egui::RichText::new("➖ Collapse All").size(11.0)).clicked() {
+            if ui.button(egui::RichText::new("[-] Collapse All").size(11.0)).clicked() {
                 self.doc.collapse_all();
             }
 
@@ -397,7 +422,7 @@ impl ViewerApp {
 
             // Copy Dropdown with 4 formats
             egui::ComboBox::from_id_salt("tree_copy_combo")
-                .selected_text(egui::RichText::new("📋 Copy ▾").size(11.0))
+                .selected_text(egui::RichText::new("Copy ▾").size(11.0))
                 .show_ui(ui, |ui| {
                     if ui.button("Copy Beautified JSON").clicked() {
                         let t = self.doc.copy_beautified(&self.settings);
@@ -421,7 +446,7 @@ impl ViewerApp {
 
             // Zoom controls
             if ui
-                .button(egui::RichText::new("🔍-").size(11.0))
+                .button(egui::RichText::new("Zoom -").size(11.0))
                 .on_hover_text("Zoom Out (Ctrl -)")
                 .clicked()
             {
@@ -429,7 +454,7 @@ impl ViewerApp {
                 self.save_settings();
             }
             if ui
-                .button(egui::RichText::new("🔍+").size(11.0))
+                .button(egui::RichText::new("Zoom +").size(11.0))
                 .on_hover_text("Zoom In (Ctrl +)")
                 .clicked()
             {
@@ -539,7 +564,22 @@ impl ViewerApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(egui::RichText::new("🔍+").size(11.0))
+                    .button(egui::RichText::new("Save").size(11.0))
+                    .on_hover_text("Save JSON File (Ctrl+S)")
+                    .clicked()
+                {
+                    self.save_file_dialog();
+                }
+                if ui
+                    .button(egui::RichText::new("Open").size(11.0))
+                    .on_hover_text("Open JSON File (Ctrl+O)")
+                    .clicked()
+                {
+                    self.open_file_dialog();
+                }
+                ui.separator();
+                if ui
+                    .button(egui::RichText::new("Zoom +").size(11.0))
                     .on_hover_text("Zoom In (Ctrl +)")
                     .clicked()
                 {
@@ -547,27 +587,12 @@ impl ViewerApp {
                     self.save_settings();
                 }
                 if ui
-                    .button(egui::RichText::new("🔍-").size(11.0))
+                    .button(egui::RichText::new("Zoom -").size(11.0))
                     .on_hover_text("Zoom Out (Ctrl -)")
                     .clicked()
                 {
                     self.settings.font_size = (self.settings.font_size - 1.0).clamp(9.0, 24.0);
                     self.save_settings();
-                }
-                ui.separator();
-                if ui
-                    .button(egui::RichText::new("💾 Save").size(11.0))
-                    .on_hover_text("Save JSON File (Ctrl+S)")
-                    .clicked()
-                {
-                    self.save_file_dialog();
-                }
-                if ui
-                    .button(egui::RichText::new("📂 Open").size(11.0))
-                    .on_hover_text("Open JSON File (Ctrl+O)")
-                    .clicked()
-                {
-                    self.open_file_dialog();
                 }
             });
         });
@@ -580,11 +605,11 @@ impl ViewerApp {
         }
 
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Search:").size(12.0).strong());
+            ui.label(egui::RichText::new("Find:").size(12.0).strong());
 
             let text_edit = egui::TextEdit::singleline(&mut self.search_input)
                 .hint_text("Search keys, values, paths...")
-                .desired_width(260.0);
+                .desired_width(220.0);
 
             let resp = ui.add(text_edit);
             if self.focus_search {
@@ -605,7 +630,7 @@ impl ViewerApp {
             }
 
             if !self.search_input.is_empty() {
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("✕").on_hover_text("Clear search").clicked() {
                     self.search_input.clear();
                     self.doc.clear_search();
                 }
@@ -640,14 +665,14 @@ impl ViewerApp {
                 }
 
                 let next_btn = ui
-                    .button(egui::RichText::new("▼ Next").size(11.0))
+                    .button(egui::RichText::new("Next ↓").size(11.0))
                     .on_hover_text("Next Match (Enter or Ctrl+G)");
                 if next_btn.clicked() {
                     self.do_search_next();
                 }
 
                 let prev_btn = ui
-                    .button(egui::RichText::new("▲ Previous").size(11.0))
+                    .button(egui::RichText::new("Prev ↑").size(11.0))
                     .on_hover_text("Previous Match (Shift+Enter or Ctrl+Shift+G)");
                 if prev_btn.clicked() {
                     self.do_search_prev();
@@ -685,9 +710,28 @@ impl ViewerApp {
         let mut expand_subtree_path: Option<String> = None;
         let mut collapse_subtree_path: Option<String> = None;
 
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show_rows(ui, row_height, total_rows, |ui, row_range| {
+        let has_expanded_leaves = !self.doc.expanded_leaf_nodes.is_empty();
+        let scroll_area = egui::ScrollArea::both().auto_shrink([false, false]);
+
+        if has_expanded_leaves {
+            scroll_area.show(ui, |ui| {
+                for row in &self.doc.visible_tree_rows {
+                    render_tree_row(
+                        ui,
+                        row,
+                        self.doc.selected_path.as_deref(),
+                        self.settings.font_size as f32,
+                        &mut toggle_path,
+                        &mut toggle_leaf_path,
+                        &mut select_path,
+                        &mut copy_payload,
+                        &mut expand_subtree_path,
+                        &mut collapse_subtree_path,
+                    );
+                }
+            });
+        } else {
+            scroll_area.show_rows(ui, row_height, total_rows, |ui, row_range| {
                 for i in row_range {
                     if let Some(row) = self.doc.visible_tree_rows.get(i).cloned() {
                         render_tree_row(
@@ -705,6 +749,7 @@ impl ViewerApp {
                     }
                 }
             });
+        }
 
         // Apply any pending interactions
         if let Some(p) = toggle_path {
@@ -733,7 +778,7 @@ impl ViewerApp {
 
         // Header Bar
         ui.horizontal(|ui| {
-            ui.strong(egui::RichText::new("▤ Properties").size(12.0));
+            ui.strong(egui::RichText::new("Properties").size(12.0));
 
             // Selected node key
             if let Some(sel) = &self.doc.selected_path {
@@ -748,9 +793,9 @@ impl ViewerApp {
             // Jump back to parent button (macOS parity)
             if let Some((parent_path, parent_key)) = parent_info {
                 let label = if parent_key == "JSON" || parent_path == "$" {
-                    "◀ Root"
+                    "← Root"
                 } else {
-                    "◀ Parent"
+                    "← Parent"
                 };
                 if ui
                     .button(egui::RichText::new(label).size(10.0))
@@ -777,11 +822,12 @@ impl ViewerApp {
 
         // Property search filter
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("🔍").size(11.0));
+            ui.label(egui::RichText::new("Filter:").size(11.0));
+            let filter_w = (ui.available_width() - 36.0).max(60.0);
             ui.add(
                 egui::TextEdit::singleline(&mut self.prop_filter)
                     .hint_text("Filter properties...")
-                    .desired_width(ui.available_width() - 28.0),
+                    .desired_width(filter_w),
             );
             if !self.prop_filter.is_empty() {
                 if ui.small_button("✕").clicked() {
@@ -812,6 +858,14 @@ impl ViewerApp {
             return;
         }
 
+        let total_count = filtered.len();
+        let display_limit = 500usize;
+        let display_slice = if total_count > display_limit {
+            &filtered[..display_limit]
+        } else {
+            &filtered[..]
+        };
+
         let mut jump_target: Option<String> = None;
         let mut copy_target: Option<(String, String)> = None;
 
@@ -821,13 +875,13 @@ impl ViewerApp {
             .show(ui, |ui| {
                 egui::Grid::new("property_grid_table")
                     .striped(true)
-                    .min_col_width(90.0)
+                    .min_col_width(80.0)
                     .show(ui, |ui| {
                         ui.strong("Name");
                         ui.strong("Value");
                         ui.end_row();
 
-                        for row in filtered {
+                        for row in display_slice {
                             // Clickable Name jumps to element in Tree
                             let mut name_btn = ui.selectable_label(
                                 false,
@@ -871,6 +925,18 @@ impl ViewerApp {
                             ui.end_row();
                         }
                     });
+
+                if total_count > display_limit {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Showing first {} of {} items. Use Filter to narrow down.",
+                            display_limit, total_count
+                        ))
+                        .size(11.0)
+                        .weak(),
+                    );
+                }
             });
 
         if let Some(target) = jump_target {
@@ -1080,24 +1146,29 @@ fn render_tree_row(
 
         // Disclosure toggle button
         if row.is_container {
-            let symbol = if row.is_expanded { "⊟" } else { "⊞" };
+            let symbol = if row.is_expanded { "[-] " } else { "[+] " };
             let toggle_btn = ui
-                .button(egui::RichText::new(symbol).size(font_size).strong())
+                .button(egui::RichText::new(symbol).monospace().size(font_size).strong())
                 .on_hover_text(if row.is_expanded { "Collapse" } else { "Expand" });
             if toggle_btn.clicked() {
                 *toggle_path = Some(row.path.clone());
             }
         } else if row.full_str.is_some() && row.char_count > 45 {
             // Big text toggle
-            let symbol = if row.is_leaf_expanded { "▲" } else { "▼" };
+            let symbol = if row.is_leaf_expanded { "[-]" } else { "[+]" };
             let toggle_btn = ui
-                .button(egui::RichText::new(symbol).size(9.0).color(ui.visuals().selection.bg_fill))
+                .button(
+                    egui::RichText::new(symbol)
+                        .monospace()
+                        .size((font_size - 2.0).max(9.0))
+                        .color(ui.visuals().selection.bg_fill),
+                )
                 .on_hover_text(if row.is_leaf_expanded { "Collapse text" } else { "Expand text" });
             if toggle_btn.clicked() {
                 *toggle_leaf_path = Some(row.path.clone());
             }
         } else {
-            ui.add_space(16.0);
+            ui.add_space(20.0);
         }
 
         // Type badge (str, num, bool, null, {N}, [N])
@@ -1207,10 +1278,10 @@ fn render_tree_row(
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.small(format!("{} chars", row.char_count));
-                            if ui.small_button("📋 Copy").clicked() {
+                            if ui.small_button("Copy").clicked() {
                                 *copy_payload = Some(("Value".into(), s.clone()));
                             }
-                            if ui.small_button("▲ Collapse").clicked() {
+                            if ui.small_button("Collapse").clicked() {
                                 *toggle_leaf_path = Some(row.path.clone());
                             }
                         });
@@ -1259,6 +1330,18 @@ impl eframe::App for ViewerApp {
             };
             ctx.request_repaint();
         }
+
+        // Handle dropped files from file manager (Nautilus, Dolphin, etc.)
+        ctx.input(|i| {
+            if let Some(file) = i.raw.dropped_files.first() {
+                if let Some(path) = &file.path {
+                    if let Ok(()) = self.doc.load_file(path, &self.settings) {
+                        self.sync_editors_from_doc();
+                        self.toast(format!("Opened {}", path.display()));
+                    }
+                }
+            }
+        });
 
         self.handle_shortcuts(ctx);
 
@@ -1339,25 +1422,25 @@ impl eframe::App for ViewerApp {
                 self.show_tree_toolbar(ctx, ui);
                 ui.separator();
 
-                // Main Viewer area (Tree on left, Property Grid on right if open)
-                let available_height = ui.available_height() - if self.show_search { 32.0 } else { 0.0 };
-                ui.allocate_ui(egui::vec2(ui.available_width(), available_height), |ui| {
-                    if self.show_props {
-                        ui.columns(2, |cols| {
-                            cols[0].group(|ui| {
-                                self.show_tree_view(ctx, ui);
-                            });
-                            cols[1].group(|ui| {
-                                self.show_property_grid(ctx, ui);
-                            });
-                        });
-                    } else {
-                        self.show_tree_view(ctx, ui);
-                    }
-                });
+                // Search Toolbar (if open)
+                if self.show_search {
+                    self.show_search_toolbar(ui);
+                    ui.separator();
+                }
 
-                // Bottom Search Bar
-                self.show_search_toolbar(ui);
+                // Main Viewer area (Tree on left, Property Grid on right if open)
+                if self.show_props {
+                    ui.columns(2, |cols| {
+                        cols[0].group(|ui| {
+                            self.show_tree_view(ctx, ui);
+                        });
+                        cols[1].group(|ui| {
+                            self.show_property_grid(ctx, ui);
+                        });
+                    });
+                } else {
+                    self.show_tree_view(ctx, ui);
+                }
             }
 
             AppTab::Text => {
@@ -1421,23 +1504,23 @@ impl eframe::App for ViewerApp {
                         self.show_tree_toolbar(ctx, right);
                         right.separator();
 
-                        let available_height = right.available_height() - if self.show_search { 32.0 } else { 0.0 };
-                        right.allocate_ui(egui::vec2(right.available_width(), available_height), |ui| {
-                            if self.show_props {
-                                ui.columns(2, |subcols| {
-                                    subcols[0].group(|ui| {
-                                        self.show_tree_view(ctx, ui);
-                                    });
-                                    subcols[1].group(|ui| {
-                                        self.show_property_grid(ctx, ui);
-                                    });
-                                });
-                            } else {
-                                self.show_tree_view(ctx, ui);
-                            }
-                        });
+                        if self.show_search {
+                            self.show_search_toolbar(right);
+                            right.separator();
+                        }
 
-                        self.show_search_toolbar(right);
+                        if self.show_props {
+                            right.columns(2, |subcols| {
+                                subcols[0].group(|ui| {
+                                    self.show_tree_view(ctx, ui);
+                                });
+                                subcols[1].group(|ui| {
+                                    self.show_property_grid(ctx, ui);
+                                });
+                            });
+                        } else {
+                            self.show_tree_view(ctx, right);
+                        }
                     }
                 });
 
