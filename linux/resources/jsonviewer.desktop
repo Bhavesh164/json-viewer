@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=JSON Viewer
+Comment=Fast, lightweight JSON viewer and formatter
+Exec=jsonviewer %F
+Icon=jsonviewer
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=jsonviewer
+MimeType=application/json;
