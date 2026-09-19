@@ -101,54 +101,79 @@ sudo apt install build-essential cargo rustc libwayland-dev libxkbcommon-dev lib
 sudo dnf install gcc cargo rust wayland-devel libxkbcommon-devel mesa-libGL-devel dejavu-sans-fonts
 ```
 
-## How to Build the Binary
+## How to Build & Install Manually
 
-Navigate into the `linux` directory and build with Cargo (same as
-`mouseless/linux`):
+You can build and install either using the provided `Makefile` or standard `cargo` commands:
 
+### 1. Fast Development Build (Quick compile)
+Run this when developing and testing quick code edits:
 ```sh
-cd linux
-cargo build --release
+# From repository root:
+make build
+
+# Or directly in linux/:
+cd linux && cargo build
+```
+The binary will be located at:
+```
+linux/target/debug/jsonviewer
 ```
 
-The optimized binary will be located at:
+### 2. Optimized Release Build (LTO & symbol stripped)
+Run this to generate the production binary with Link-Time Optimization and stripped debug symbols (~12 MB):
+```sh
+# From repository root:
+make release
+
+# Or directly in linux/:
+cd linux && cargo build --release
+```
+The binary will be located at:
 ```
 linux/target/release/jsonviewer
 ```
 
-Run tests (core parser / Python literals / document model):
+### 3. Install for Current User (Recommended, No `sudo` needed)
+Copies the release binary to your `~/.local/bin` (already on `$PATH` in Omarchy and modern distributions) and self-registers the desktop entry and icons for application launchers:
 ```sh
-cd linux
-cargo test
+cp linux/target/release/jsonviewer ~/.local/bin/jsonviewer
+~/.local/bin/jsonviewer --install
+```
+
+### 4. Install System-wide into `/usr/local/bin` (Requires `sudo`)
+Installs the binary into `/usr/local/bin` and the `.desktop` launcher and icons into system-wide `/usr/share/`:
+```sh
+# From repository root:
+sudo make install
+
+# Or inside linux/:
+cd linux && sudo make install
+```
+
+### 5. Run Unit Tests
+Run the test suite (JSON parsing, Python literals, document model, tree flattening, search, font loading):
+```sh
+# From repository root:
+make test
+
+# Or inside linux/:
+cd linux && cargo test
 ```
 
 ## How to Run
 
 ```sh
-cd linux
-./target/release/jsonviewer [FILE]
+# Run installed binary
+jsonviewer [FILE]
+
+# Or run directly from build output
+./linux/target/release/jsonviewer [FILE]
 ```
 
 - `jsonviewer` — launch with the built-in sample document.
 - `jsonviewer data.json` — open a file directly.
-- `jsonviewer --help` — print usage.
-
-### Optional: install user-local or system-wide
-
-```sh
-# Install to ~/.local/bin (recommended — already on PATH on Omarchy)
-cp target/release/jsonviewer ~/.local/bin/
-
-# Or install system-wide
-sudo cp target/release/jsonviewer /usr/local/bin/
-```
-
-### Optional: desktop entry (app launcher)
-
-```sh
-cp resources/jsonviewer.desktop ~/.local/share/applications/
-# point Exec= at wherever you installed the binary
-```
+- `jsonviewer --install` — install/refresh desktop launcher and icons in `~/.local/share/`.
+- `jsonviewer --help` — print usage and options.
 
 ## Configuration
 
