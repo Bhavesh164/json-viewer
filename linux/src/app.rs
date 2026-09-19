@@ -613,7 +613,7 @@ impl ViewerApp {
                 .hint_text("Search keys, values, paths...")
                 .desired_width(220.0);
 
-            let mut resp = ui.add(text_edit);
+            let resp = ui.add(text_edit);
             if self.focus_search {
                 resp.request_focus();
                 self.focus_search = false;
