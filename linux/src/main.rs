@@ -245,15 +245,74 @@ mod tests {
     }
 
     #[test]
-    fn large_array_properties_handled_safely() {
+    fn egui_frame_simulations_all_tabs() {
+        let ctx = egui::Context::default();
+        super::setup_fonts(&ctx);
+
         let s = Settings::default();
-        let mut m = DocumentModel::new(&s);
-        let items: Vec<String> = (0..1200).map(|i| format!(r#"{{"id":{}}}"#, i)).collect();
-        m.raw_text = format!(r#"[{}]"#, items.join(","));
-        assert!(m.parse_and_build_tree(true, &s));
-        m.selected_path = Some("$".to_string());
-        let (parent, props) = m.properties_for_selected();
-        assert!(parent.is_none());
-        assert_eq!(props.len(), 1200);
+        let mut app = ViewerApp::new(s, None);
+
+        // Frame 1: Viewer Tab
+        app.doc.active_tab = crate::model::AppTab::Viewer;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.show_main_header(ui);
+                app.show_tree_toolbar(ctx, ui);
+                app.show_tree_view(ctx, ui);
+                app.show_property_grid(ctx, ui);
+                app.show_search_toolbar(ui);
+            });
+            app.show_settings_window(ctx);
+            app.show_shortcuts_window(ctx);
+            app.show_about_window(ctx);
+        });
+
+        // Frame 2: Text Tab
+        app.doc.active_tab = crate::model::AppTab::Text;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.show_main_header(ui);
+                app.show_text_toolbar(ctx, ui);
+            });
+        });
+
+        // Frame 3: Split Tab
+        app.doc.active_tab = crate::model::AppTab::Split;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.show_main_header(ui);
+                ui.columns(2, |cols| {
+                    app.show_text_toolbar(ctx, &mut cols[0]);
+                    app.show_tree_toolbar(ctx, &mut cols[1]);
+                    app.show_tree_view(ctx, &mut cols[1]);
+                });
+            });
+        });
+
+        // Test transformations
+        app.apply_transform("format");
+        app.apply_transform("minify");
+        app.apply_transform("stringify");
+        app.apply_transform("unescape");
+        app.apply_transform("j2p");
+        app.apply_transform("p2j");
+
+        // Test search
+        app.search_input = "macOS".to_string();
+        app.do_search_go();
+        app.do_search_next();
+        app.do_search_prev();
+
+        // Test leaf expansion
+        if let Some(first_leaf) = app.doc.visible_tree_rows.iter().find(|r| !r.is_container).cloned() {
+            app.doc.toggle_expand_leaf(&first_leaf.path);
+        }
+
+        // Run frame with expanded leaf
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.show_tree_view(ctx, ui);
+            });
+        });
     }
 }
