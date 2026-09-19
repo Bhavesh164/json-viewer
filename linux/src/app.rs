@@ -106,22 +106,22 @@ impl ViewerApp {
         }
     }
 
-    fn do_search_go(&mut self) {
+    pub fn do_search_go(&mut self) {
         self.doc.search_query = self.search_input.clone();
         self.doc.search_start(&self.settings);
     }
 
-    fn do_search_next(&mut self) {
+    pub fn do_search_next(&mut self) {
         self.doc.search_query = self.search_input.clone();
         self.doc.search_next(&self.settings);
     }
 
-    fn do_search_prev(&mut self) {
+    pub fn do_search_prev(&mut self) {
         self.doc.search_query = self.search_input.clone();
         self.doc.search_previous(&self.settings);
     }
 
-    fn apply_transform(&mut self, kind: &str) {
+    pub fn apply_transform(&mut self, kind: &str) {
         let res = match kind {
             "format" => self.doc.beautify(&self.settings),
             "minify" => self.doc.minify(&self.settings),
@@ -283,7 +283,7 @@ impl ViewerApp {
     }
 
     // MARK: - Top Main Header (Segmented Control & Global Actions)
-    fn show_main_header(&mut self, ui: &mut egui::Ui) {
+    pub fn show_main_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // App Title / Branding
             ui.strong(egui::RichText::new("{ } JSON Viewer").size(14.0));
@@ -409,8 +409,8 @@ impl ViewerApp {
     }
 
     // MARK: - Viewer Tab Tree Action Bar (matching TreeViewer.swift)
-    fn show_tree_toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+    pub fn show_tree_toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(egui::RichText::new("[+] Expand All").size(11.0)).clicked() {
                 self.doc.expand_all();
             }
@@ -477,8 +477,8 @@ impl ViewerApp {
     }
 
     // MARK: - Text Tab Action Toolbar (matching TextEditorView.swift)
-    fn show_text_toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+    pub fn show_text_toolbar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(egui::RichText::new("Paste").size(11.0)).clicked() {
                 self.paste_from_clipboard();
             }
@@ -548,58 +548,60 @@ impl ViewerApp {
             ui.separator();
 
             if ui
-                .button(egui::RichText::new("JSON → Python").size(11.0))
+                .button(egui::RichText::new("JSON → Py").size(11.0))
                 .on_hover_text("Convert JSON in editor directly into Python dictionary format")
                 .clicked()
             {
                 self.apply_transform("j2p");
             }
             if ui
-                .button(egui::RichText::new("Python → JSON").size(11.0))
+                .button(egui::RichText::new("Py → JSON").size(11.0))
                 .on_hover_text("Convert Python dictionary in editor directly into valid JSON")
                 .clicked()
             {
                 self.apply_transform("p2j");
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(egui::RichText::new("Save").size(11.0))
-                    .on_hover_text("Save JSON File (Ctrl+S)")
-                    .clicked()
-                {
-                    self.save_file_dialog();
-                }
-                if ui
-                    .button(egui::RichText::new("Open").size(11.0))
-                    .on_hover_text("Open JSON File (Ctrl+O)")
-                    .clicked()
-                {
-                    self.open_file_dialog();
-                }
-                ui.separator();
-                if ui
-                    .button(egui::RichText::new("Zoom +").size(11.0))
-                    .on_hover_text("Zoom In (Ctrl +)")
-                    .clicked()
-                {
-                    self.settings.font_size = (self.settings.font_size + 1.0).clamp(9.0, 24.0);
-                    self.save_settings();
-                }
-                if ui
-                    .button(egui::RichText::new("Zoom -").size(11.0))
-                    .on_hover_text("Zoom Out (Ctrl -)")
-                    .clicked()
-                {
-                    self.settings.font_size = (self.settings.font_size - 1.0).clamp(9.0, 24.0);
-                    self.save_settings();
-                }
-            });
+            ui.separator();
+
+            if ui
+                .button(egui::RichText::new("Open").size(11.0))
+                .on_hover_text("Open JSON File (Ctrl+O)")
+                .clicked()
+            {
+                self.open_file_dialog();
+            }
+            if ui
+                .button(egui::RichText::new("Save").size(11.0))
+                .on_hover_text("Save JSON File (Ctrl+S)")
+                .clicked()
+            {
+                self.save_file_dialog();
+            }
+
+            ui.separator();
+
+            if ui
+                .button(egui::RichText::new("Zoom -").size(11.0))
+                .on_hover_text("Zoom Out (Ctrl -)")
+                .clicked()
+            {
+                self.settings.font_size = (self.settings.font_size - 1.0).clamp(9.0, 24.0);
+                self.save_settings();
+            }
+            if ui
+                .button(egui::RichText::new("Zoom +").size(11.0))
+                .on_hover_text("Zoom In (Ctrl +)")
+                .clicked()
+            {
+                self.settings.font_size = (self.settings.font_size + 1.0).clamp(9.0, 24.0);
+                self.save_settings();
+            }
         });
     }
 
     // MARK: - Bottom-Docked Search Bar (matching SearchToolbar.swift)
-    fn show_search_toolbar(&mut self, ui: &mut egui::Ui) {
+    pub fn show_search_toolbar(&mut self, ui: &mut egui::Ui) {
         if !self.show_search {
             return;
         }
@@ -611,13 +613,17 @@ impl ViewerApp {
                 .hint_text("Search keys, values, paths...")
                 .desired_width(220.0);
 
-            let resp = ui.add(text_edit);
+            let mut resp = ui.add(text_edit);
             if self.focus_search {
                 resp.request_focus();
                 self.focus_search = false;
             }
 
-            let enter_pressed = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            // Fix search on Enter:
+            // Singleline TextEdit loses focus when Enter is pressed in egui.
+            // Check both lost_focus and has_focus, and retain focus so consecutive Enters cycle!
+            let enter_pressed = (resp.lost_focus() || resp.has_focus())
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if enter_pressed {
                 let shift = ui.input(|i| i.modifiers.shift);
                 if shift {
@@ -627,6 +633,7 @@ impl ViewerApp {
                 } else {
                     self.do_search_next();
                 }
+                resp.request_focus();
             }
 
             if !self.search_input.is_empty() {
@@ -636,10 +643,18 @@ impl ViewerApp {
                 }
             }
 
+            // Fix GO! button:
+            // If the query is unchanged and results exist, advance to next match!
+            // If new query, start search.
             let go_btn = egui::Button::new(egui::RichText::new("GO!").size(11.0).strong())
                 .fill(ui.visuals().selection.bg_fill);
             if ui.add(go_btn).clicked() {
-                self.do_search_go();
+                if self.doc.last_executed_query == self.search_input.trim() && !self.doc.search_results.is_empty() {
+                    self.do_search_next();
+                } else {
+                    self.do_search_go();
+                }
+                resp.request_focus();
             }
 
             if !self.doc.search_status.is_empty() {
@@ -682,7 +697,7 @@ impl ViewerApp {
     }
 
     // MARK: - Virtualized Tree View (matching TreeViewer.swift)
-    fn show_tree_view(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub fn show_tree_view(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         if self.doc.root.is_none() {
             ui.vertical_centered(|ui| {
                 ui.add_space(60.0);
@@ -710,15 +725,15 @@ impl ViewerApp {
         let mut expand_subtree_path: Option<String> = None;
         let mut collapse_subtree_path: Option<String> = None;
 
-        let has_expanded_leaves = !self.doc.expanded_leaf_nodes.is_empty();
         let scroll_area = egui::ScrollArea::both().auto_shrink([false, false]);
 
-        if has_expanded_leaves {
-            scroll_area.show(ui, |ui| {
-                for row in &self.doc.visible_tree_rows {
+        // Always virtualize rows so even 100,000+ line documents remain 60fps and never crash/OOM
+        scroll_area.show_rows(ui, row_height, total_rows, |ui, row_range| {
+            for i in row_range {
+                if let Some(row) = self.doc.visible_tree_rows.get(i).cloned() {
                     render_tree_row(
                         ui,
-                        row,
+                        &row,
                         self.doc.selected_path.as_deref(),
                         self.settings.font_size as f32,
                         &mut toggle_path,
@@ -729,27 +744,8 @@ impl ViewerApp {
                         &mut collapse_subtree_path,
                     );
                 }
-            });
-        } else {
-            scroll_area.show_rows(ui, row_height, total_rows, |ui, row_range| {
-                for i in row_range {
-                    if let Some(row) = self.doc.visible_tree_rows.get(i).cloned() {
-                        render_tree_row(
-                            ui,
-                            &row,
-                            self.doc.selected_path.as_deref(),
-                            self.settings.font_size as f32,
-                            &mut toggle_path,
-                            &mut toggle_leaf_path,
-                            &mut select_path,
-                            &mut copy_payload,
-                            &mut expand_subtree_path,
-                            &mut collapse_subtree_path,
-                        );
-                    }
-                }
-            });
-        }
+            }
+        });
 
         // Apply any pending interactions
         if let Some(p) = toggle_path {
@@ -773,7 +769,7 @@ impl ViewerApp {
     }
 
     // MARK: - Property Grid (matching PropertyGridView.swift)
-    fn show_property_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub fn show_property_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let (parent_info, properties) = self.doc.properties_for_selected();
 
         // Header Bar
@@ -948,7 +944,7 @@ impl ViewerApp {
     }
 
     // MARK: - Modals (Settings, Shortcuts, About)
-    fn show_settings_window(&mut self, ctx: &egui::Context) {
+    pub fn show_settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
         }
@@ -1025,7 +1021,7 @@ impl ViewerApp {
         }
     }
 
-    fn show_shortcuts_window(&mut self, ctx: &egui::Context) {
+    pub fn show_shortcuts_window(&mut self, ctx: &egui::Context) {
         if !self.show_shortcuts {
             return;
         }
@@ -1089,7 +1085,7 @@ impl ViewerApp {
         }
     }
 
-    fn show_about_window(&mut self, ctx: &egui::Context) {
+    pub fn show_about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
             return;
         }
@@ -1103,14 +1099,21 @@ impl ViewerApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
                     ui.strong(egui::RichText::new("{ } JSON Viewer").size(18.0));
-                    ui.label(egui::RichText::new("Version 1.0.0").weak());
+                    ui.add_space(4.0);
+                    ui.label("Version 1.0.0 (Linux)");
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Fast, lightweight JSON viewer, formatter & inspection tool for Linux Wayland/X11.")
+                            .size(11.0)
+                            .weak(),
+                    );
                     ui.add_space(8.0);
-                    ui.label("Native Wayland & X11 JSON Viewer and Formatter.");
-                    ui.label("Complete parity port of the macOS SwiftUI application.");
+                    ui.separator();
                     ui.add_space(8.0);
-                    ui.small("Preserves object key ordering, comments, trailing commas, and Python dicts.");
-                    ui.add_space(8.0);
-                    if ui.button("OK").clicked() {
+                    ui.label("Developed for Omarchy Linux & cross-distro Linux.");
+                    ui.label("Full parity with macOS SwiftUI version.");
+                    ui.add_space(12.0);
+                    if ui.button("Close").clicked() {
                         self.show_about = false;
                     }
                 });
@@ -1204,6 +1207,10 @@ fn render_tree_row(
                     .color(badge_color),
             )
         };
+
+        if is_selected {
+            row_resp.scroll_to_me(Some(egui::Align::Center));
+        }
 
         if row_resp.clicked() {
             *select_path = Some(row.path.clone());

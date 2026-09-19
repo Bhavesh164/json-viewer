@@ -33,14 +33,42 @@ pub fn ensure_desktop_integration() {
     let apps_dir = data_dir.join("applications");
     let desktop_file = apps_dir.join("jsonviewer.desktop");
 
+    // Determine the optimal Exec path:
+    // 1. If /usr/local/bin/jsonviewer exists, Exec=/usr/local/bin/jsonviewer %F
+    // 2. Else if std::env::current_exe() is available, use its full path (e.g. ~/.local/bin/jsonviewer)
+    // 3. Fallback to jsonviewer %F
+    let exe_path = if Path::new("/usr/local/bin/jsonviewer").is_file() {
+        "/usr/local/bin/jsonviewer".to_string()
+    } else if let Ok(cur) = std::env::current_exe() {
+        cur.to_string_lossy().to_string()
+    } else {
+        "jsonviewer".to_string()
+    };
+
+    let desktop_content = format!(
+        "[Desktop Entry]\n\
+         Name=JSON Viewer\n\
+         Comment=Fast, lightweight JSON viewer and formatter\n\
+         TryExec=jsonviewer\n\
+         Exec={} %F\n\
+         Icon=jsonviewer\n\
+         Terminal=false\n\
+         Type=Application\n\
+         Categories=Development;Utility;\n\
+         StartupNotify=false\n\
+         StartupWMClass=jsonviewer\n\
+         MimeType=application/json;\n",
+        exe_path
+    );
+
     // Write desktop entry if missing or outdated
     let _ = fs::create_dir_all(&apps_dir);
     let should_write_desktop = match fs::read_to_string(&desktop_file) {
-        Ok(existing) => existing != DESKTOP_ENTRY_STR,
+        Ok(existing) => existing != desktop_content,
         Err(_) => true,
     };
     if should_write_desktop {
-        let _ = fs::write(&desktop_file, DESKTOP_ENTRY_STR);
+        let _ = fs::write(&desktop_file, desktop_content);
         // Silently notify desktop database if available
         let _ = std::process::Command::new("update-desktop-database")
             .arg(&apps_dir)

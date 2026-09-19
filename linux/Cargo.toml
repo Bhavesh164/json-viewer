@@ -13,6 +13,10 @@ egui = "0.32"
 rfd = "0.15"
 arboard = "3"
 
+[lib]
+name = "jsonviewer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "jsonviewer"
 path = "src/main.rs"
