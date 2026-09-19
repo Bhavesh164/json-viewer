@@ -97,7 +97,28 @@ pub fn setup_fonts(ctx: &egui::Context) {
 fn main() -> eframe::Result<()> {
     install_panic_hook();
 
+    let pid = std::process::id();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+    let display = std::env::var("DISPLAY").ok();
+
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/jsonviewer_runtime.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            f,
+            "[{:?}] MAIN START: pid={}, args={:?}, WAYLAND={:?}, DISPLAY={:?}",
+            std::time::SystemTime::now(),
+            pid,
+            args,
+            wayland,
+            display
+        );
+    }
+
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{}", HELP);
         return Ok(());
@@ -111,7 +132,11 @@ fn main() -> eframe::Result<()> {
     // Ensure desktop entry and icons are registered for Omarchy / XDG launchers
     desktop::ensure_desktop_integration();
 
-    let initial = args.first().cloned();
+    // Filter out desktop placeholder arguments like "%F", "%f", "%U", "%u"
+    let initial = args
+        .first()
+        .filter(|a| !a.starts_with('%') && !a.trim().is_empty())
+        .cloned();
 
     let store = SettingsStore::new();
     let settings = store.settings.clone();
@@ -131,14 +156,32 @@ fn main() -> eframe::Result<()> {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+
+    let result = eframe::run_native(
         "JSON Viewer",
         options,
         Box::new(move |cc| {
             setup_fonts(&cc.egui_ctx);
             Ok(Box::new(ViewerApp::new(settings, initial)))
         }),
-    )
+    );
+
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/jsonviewer_runtime.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            f,
+            "[{:?}] MAIN EXIT: pid={}, result={:?}",
+            std::time::SystemTime::now(),
+            pid,
+            result
+        );
+    }
+
+    result
 }
 
 #[cfg(test)]
