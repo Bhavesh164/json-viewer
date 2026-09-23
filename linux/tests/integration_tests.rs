@@ -199,3 +199,139 @@ fn large_5mb_file_parsing_search_and_virtualization() {
         });
     });
 }
+
+#[test]
+fn search_with_collapsed_nodes_expands_containers() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = jsonviewer::model::SAMPLE_JSON.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+
+    // Collapse all containers
+    m.collapse_all();
+    assert!(!m.expanded_nodes.contains("$.statistics"));
+    assert!(!m.visible_tree_rows.iter().any(|r| r.path == "$.statistics.downloads"));
+
+    // Search for "downloads", which is inside collapsed $.statistics
+    m.search_query = "downloads".to_string();
+    m.search_start(&s);
+
+    assert_eq!(m.search_results.len(), 1);
+    assert_eq!(m.search_results[0], "$.statistics.downloads");
+    // $.statistics container must now be expanded!
+    assert!(m.expanded_nodes.contains("$.statistics"));
+    // "downloads" row must now be present in visible rows!
+    assert!(m.visible_tree_rows.iter().any(|r| r.path == "$.statistics.downloads"));
+    assert_eq!(m.requested_scroll_path.as_deref(), Some("$.statistics.downloads"));
+}
+
+#[test]
+fn search_container_node_itself_expands() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = jsonviewer::model::SAMPLE_JSON.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+
+    // Collapse all
+    m.collapse_all();
+    assert!(!m.expanded_nodes.contains("$.author"));
+    assert!(!m.visible_tree_rows.iter().any(|r| r.path == "$.author.name"));
+
+    // Search for "author", which is a container node itself
+    m.search_query = "author".to_string();
+    m.search_start(&s);
+
+    assert!(!m.search_results.is_empty());
+    // $.author itself must now be expanded!
+    assert!(m.expanded_nodes.contains("$.author"));
+    // Child rows like "name" must now be visible in the tree
+    assert!(m.visible_tree_rows.iter().any(|r| r.path == "$.author.name"));
+}
+
+#[test]
+fn search_when_root_itself_collapsed_expands() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = jsonviewer::model::SAMPLE_JSON.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+
+    // Collapse even the root node ($)
+    m.collapse_all();
+    m.toggle_expand("$");
+    assert!(!m.expanded_nodes.contains("$"));
+    assert_eq!(m.visible_tree_rows.len(), 1); // Only root row itself
+
+    // Search for "rating"
+    m.search_query = "rating".to_string();
+    m.search_start(&s);
+
+    assert!(m.expanded_nodes.contains("$"));
+    assert!(m.visible_tree_rows.iter().any(|r| r.path == "$.rating"));
+    assert_eq!(m.requested_scroll_path.as_deref(), Some("$.rating"));
+}
+
+#[test]
+fn scrolling_request_consumed_in_egui_frame() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+
+    let s = Settings::default();
+    let mut app = ViewerApp::new(s, None);
+    app.doc.collapse_all();
+
+    app.search_input = "downloads".to_string();
+    app.do_search_go();
+
+    assert_eq!(app.doc.requested_scroll_path.as_deref(), Some("$.statistics.downloads"));
+
+    // Frame 1: tree view renders and consumes the scroll request to center the row
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.show_tree_view(ctx, ui);
+        });
+    });
+
+    // The scroll request must have been consumed
+    assert!(app.doc.requested_scroll_path.is_none());
+
+    // Frame 2: subsequent frames leave requested_scroll_path as None so user scrolling is never locked
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.show_tree_view(ctx, ui);
+        });
+    });
+
+    assert!(app.doc.requested_scroll_path.is_none());
+}
+
+#[test]
+fn search_next_previous_cycling_expands_and_scrolls() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = jsonviewer::model::SAMPLE_JSON.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+
+    m.collapse_all();
+    // Search query "local" matches $.author.email
+    // Search query "1" matches multiple places across collapsed containers
+    m.search_query = "8".to_string();
+    m.search_start(&s);
+    assert!(m.search_results.len() >= 2);
+
+    let first_target = m.search_results[0].clone();
+    assert_eq!(m.requested_scroll_path.as_deref(), Some(first_target.as_str()));
+    assert!(m.visible_tree_rows.iter().any(|r| r.path == first_target));
+
+    // Next match
+    m.search_next(&s);
+    let second_target = m.search_results[1].clone();
+    assert_eq!(m.requested_scroll_path.as_deref(), Some(second_target.as_str()));
+    assert!(m.visible_tree_rows.iter().any(|r| r.path == second_target));
+
+    // Previous match returns to first
+    m.search_previous(&s);
+    assert_eq!(m.requested_scroll_path.as_deref(), Some(first_target.as_str()));
+    assert!(m.visible_tree_rows.iter().any(|r| r.path == first_target));
+}
+
+

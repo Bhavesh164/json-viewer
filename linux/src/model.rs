@@ -259,6 +259,7 @@ pub struct DocumentModel {
     pub expanded_leaf_nodes: HashSet<String>,
     pub visible_tree_rows: Vec<FlatTreeRow>,
     pub tree_version: usize,
+    pub requested_scroll_path: Option<String>,
 }
 
 impl DocumentModel {
@@ -284,6 +285,7 @@ impl DocumentModel {
             expanded_leaf_nodes: HashSet::new(),
             visible_tree_rows: Vec::new(),
             tree_version: 0,
+            requested_scroll_path: None,
         };
         let _ = m.parse_and_build_tree(true, settings);
         if let Some(v) = &m.json_value {
@@ -538,7 +540,17 @@ impl DocumentModel {
             for a in ancestors {
                 self.expanded_nodes.insert(a);
             }
+            if let Some(node) = self.find_node(path) {
+                if node.is_container() {
+                    self.expanded_nodes.insert(path.to_string());
+                }
+            }
             self.update_visible_rows();
+        } else if let Some(root) = &self.root {
+            if root.path == path {
+                self.expanded_nodes.insert(root.path.clone());
+                self.update_visible_rows();
+            }
         }
     }
 
@@ -547,6 +559,7 @@ impl DocumentModel {
         self.json_value = None;
         self.root = None;
         self.selected_path = None;
+        self.requested_scroll_path = None;
         self.parse_error = None;
         self.clear_search();
         self.expanded_nodes.clear();
@@ -819,12 +832,18 @@ impl DocumentModel {
         if let Some((parent_path, _)) = self.parent_of_selected() {
             self.selected_path = Some(parent_path.clone());
             self.ensure_visible(&parent_path);
+            self.requested_scroll_path = Some(parent_path);
         }
     }
 
     pub fn navigate_to_property(&mut self, path: &str) {
+        self.select_and_reveal(path);
+    }
+
+    pub fn select_and_reveal(&mut self, path: &str) {
         self.selected_path = Some(path.to_string());
         self.ensure_visible(path);
+        self.requested_scroll_path = Some(path.to_string());
     }
 
     pub fn status_text(&self) -> String {
@@ -849,6 +868,7 @@ impl DocumentModel {
         self.search_result_ids.clear();
         self.search_status.clear();
         self.last_executed_query.clear();
+        self.requested_scroll_path = None;
         self.current_search_index = 0;
         self.update_visible_rows();
     }
@@ -863,6 +883,7 @@ impl DocumentModel {
         if self.root.is_none() {
             if !self.parse_and_build_tree(true, settings) {
                 self.search_status = "Phrase not found!".to_string();
+                self.requested_scroll_path = None;
                 return;
             }
         }
@@ -870,6 +891,7 @@ impl DocumentModel {
             Some(r) => r.clone(),
             None => {
                 self.search_status = "Phrase not found!".to_string();
+                self.requested_scroll_path = None;
                 return;
             }
         };
@@ -879,11 +901,13 @@ impl DocumentModel {
 
         if self.search_results.is_empty() {
             self.search_status = "Phrase not found!".to_string();
+            self.requested_scroll_path = None;
         } else {
             self.current_search_index = 0;
             let target = self.search_results[0].clone();
             self.selected_path = Some(target.clone());
             self.ensure_visible(&target);
+            self.requested_scroll_path = Some(target);
             self.search_status = format!("1 of {} matches", self.search_results.len());
         }
         self.update_visible_rows();
@@ -902,7 +926,9 @@ impl DocumentModel {
         let target = self.search_results[self.current_search_index].clone();
         self.selected_path = Some(target.clone());
         self.ensure_visible(&target);
+        self.requested_scroll_path = Some(target);
         self.search_status = format!("{} of {} matches", self.current_search_index + 1, self.search_results.len());
+        self.update_visible_rows();
     }
 
     pub fn search_previous(&mut self, settings: &Settings) {
@@ -917,7 +943,9 @@ impl DocumentModel {
                 let target = self.search_results[self.current_search_index].clone();
                 self.selected_path = Some(target.clone());
                 self.ensure_visible(&target);
+                self.requested_scroll_path = Some(target);
                 self.search_status = format!("{} of {} matches", self.current_search_index + 1, self.search_results.len());
+                self.update_visible_rows();
             }
             return;
         }
@@ -932,7 +960,9 @@ impl DocumentModel {
         let target = self.search_results[self.current_search_index].clone();
         self.selected_path = Some(target.clone());
         self.ensure_visible(&target);
+        self.requested_scroll_path = Some(target);
         self.search_status = format!("{} of {} matches", self.current_search_index + 1, self.search_results.len());
+        self.update_visible_rows();
     }
 
     // MARK: - File I/O

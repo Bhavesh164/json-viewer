@@ -636,6 +636,16 @@ impl ViewerApp {
                 resp.request_focus();
             }
 
+            let escape_pressed = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if escape_pressed {
+                if !self.search_input.is_empty() {
+                    self.search_input.clear();
+                    self.doc.clear_search();
+                } else {
+                    self.show_search = false;
+                }
+            }
+
             if !self.search_input.is_empty() {
                 if ui.small_button("✕").on_hover_text("Clear search").clicked() {
                     self.search_input.clear();
@@ -725,7 +735,23 @@ impl ViewerApp {
         let mut expand_subtree_path: Option<String> = None;
         let mut collapse_subtree_path: Option<String> = None;
 
-        let scroll_area = egui::ScrollArea::both().auto_shrink([false, false]);
+        let mut scroll_area = egui::ScrollArea::both().auto_shrink([false, false]);
+
+        // When a search match or node navigation reveals a row, center it in the viewport once:
+        if let Some(target_path) = self.doc.requested_scroll_path.take() {
+            if let Some(idx) = self.doc.visible_tree_rows.iter().position(|r| r.path == target_path) {
+                let available_height = ui.available_height();
+                let viewport_h = if available_height.is_finite() && available_height > 60.0 {
+                    available_height
+                } else {
+                    400.0
+                };
+                let row_pitch = row_height + ui.spacing().item_spacing.y;
+                let target_y = idx as f32 * row_pitch;
+                let target_offset = (target_y - (viewport_h - row_height) * 0.5).max(0.0);
+                scroll_area = scroll_area.vertical_scroll_offset(target_offset);
+            }
+        }
 
         // Always virtualize rows so even 100,000+ line documents remain 60fps and never crash/OOM
         scroll_area.show_rows(ui, row_height, total_rows, |ui, row_range| {
@@ -1208,8 +1234,21 @@ fn render_tree_row(
             )
         };
 
-        if is_selected {
-            row_resp.scroll_to_me(Some(egui::Align::Center));
+        if row.is_match {
+            ui.add_space(4.0);
+            egui::Frame::group(ui.style())
+                .fill(ui.visuals().selection.bg_fill)
+                .corner_radius(3.0)
+                .inner_margin(egui::Margin::symmetric(4, 1))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("MATCH")
+                            .monospace()
+                            .size((font_size - 3.0).max(8.0))
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    );
+                });
         }
 
         if row_resp.clicked() {
