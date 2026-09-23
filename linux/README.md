@@ -133,14 +133,30 @@ The binary will be located at:
 linux/target/release/jsonviewer
 ```
 
-### 3. Install for Current User (Recommended, No `sudo` needed)
+### 3. Package for Release (`.tar.gz` & standalone binary)
+Run this command to compile the release binary and bundle it into a distributable archive ready for GitHub Releases:
+```sh
+# Inside linux/:
+cd linux && make package
+
+# Or from repository root:
+make -C linux package
+```
+This generates two artifacts in `linux/target/release/`:
+- **`jsonviewer-linux-x86_64.tar.gz`** (~6 MB) — Recommended release archive containing the self-contained binary `jsonviewer`, `jsonviewer.desktop` entry, and application icons.
+- **`jsonviewer-linux-x86_64`** (~11.8 MB) — Standalone single executable (copy and run directly).
+
+> [!NOTE]
+> **Zero External Dependencies**: The Linux binary is 100% self-contained and only links to system `libc`/`libm`/`libgcc`. All fonts (JetBrains Mono) and icons are embedded directly into the binary at compile time. It runs out-of-the-box on Ubuntu, Debian, Fedora, Arch Linux, Manjaro, openSUSE, and any standard Linux distribution without installing extra packages.
+
+### 4. Install for Current User (Recommended, No `sudo` needed)
 Copies the release binary to your `~/.local/bin` (already on `$PATH` in Omarchy and modern distributions) and self-registers the desktop entry and icons for application launchers:
 ```sh
 cp linux/target/release/jsonviewer ~/.local/bin/jsonviewer
 ~/.local/bin/jsonviewer --install
 ```
 
-### 4. Install System-wide into `/usr/local/bin` (Requires `sudo`)
+### 5. Install System-wide into `/usr/local/bin` (Requires `sudo`)
 Installs the binary into `/usr/local/bin` and the `.desktop` launcher and icons into system-wide `/usr/share/`:
 ```sh
 # From repository root:
@@ -150,7 +166,7 @@ sudo make install
 cd linux && sudo make install
 ```
 
-### 5. Run Unit Tests
+### 6. Run Unit Tests
 Run the test suite (JSON parsing, Python literals, document model, tree flattening, search, font loading):
 ```sh
 # From repository root:
@@ -159,6 +175,25 @@ make test
 # Or inside linux/:
 cd linux && cargo test
 ```
+
+## 📦 What to Upload to GitHub Releases
+
+When publishing a new release on GitHub, upload these files from `linux/target/release/`:
+1. **`jsonviewer-linux-x86_64.tar.gz`** (Primary download)
+2. **`jsonviewer-linux-x86_64`** (Optional standalone single-binary download)
+
+### How End-Users Run It on Any Linux Machine
+
+No installation or dependencies required:
+```sh
+# Extract and launch
+tar -xzf jsonviewer-linux-x86_64.tar.gz
+./jsonviewer
+
+# (Optional) Register desktop launcher in system app menus
+./jsonviewer --install
+```
+
 
 ## How to Run
 

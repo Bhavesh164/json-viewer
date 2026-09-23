@@ -1,4 +1,4 @@
-.PHONY: all build release install clean
+.PHONY: all build release package install test clean
 
 all: build
 
@@ -7,6 +7,21 @@ build:
 
 release:
 	cargo build --release
+
+package: release
+	@mkdir -p target/release/staging
+	@cp target/release/jsonviewer target/release/staging/
+	@cp resources/jsonviewer.desktop target/release/staging/
+	@cp resources/AppIcon.png target/release/staging/jsonviewer.png
+	@cp resources/AppIcon.png target/release/staging/
+	@cp target/release/jsonviewer target/release/jsonviewer-linux-x86_64
+	@tar -czf target/release/jsonviewer-linux-x86_64.tar.gz -C target/release/staging .
+	@rm -rf target/release/staging
+	@echo "Release archive created: target/release/jsonviewer-linux-x86_64.tar.gz"
+	@echo "Standalone binary created: target/release/jsonviewer-linux-x86_64"
+
+test:
+	cargo test
 
 install: release
 	install -d $(DESTDIR)/usr/local/bin
@@ -22,3 +37,4 @@ install: release
 
 clean:
 	cargo clean
+
