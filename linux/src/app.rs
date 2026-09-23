@@ -736,6 +736,7 @@ impl ViewerApp {
         let mut collapse_subtree_path: Option<String> = None;
 
         let mut scroll_area = egui::ScrollArea::both()
+            .id_salt("tree_view_scroll_area")
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
@@ -897,6 +898,7 @@ impl ViewerApp {
 
         // Two-column table: Name | Value
         egui::ScrollArea::both()
+            .id_salt("property_grid_scroll_area")
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
@@ -1370,6 +1372,50 @@ fn config_path() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".config").join("JSONViewer").join("config.json")
 }
 
+fn show_two_columns_70_30<R>(
+    ui: &mut egui::Ui,
+    add_contents: impl FnOnce(&mut egui::Ui, &mut egui::Ui) -> R,
+) -> R {
+    let spacing = ui.spacing().item_spacing.x;
+    let total_width = ui.available_width() - spacing;
+    let left_width = (total_width * 0.70).floor().max(100.0);
+    let right_width = (total_width - left_width).max(100.0);
+    let top_left = ui.cursor().min;
+    let max_bottom = ui.max_rect().bottom();
+
+    let left_rect = egui::Rect::from_min_max(
+        top_left,
+        egui::pos2(top_left.x + left_width, max_bottom),
+    );
+    let mut left_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(left_rect)
+            .layout(egui::Layout::top_down_justified(egui::Align::LEFT)),
+    );
+    left_ui.set_width(left_width);
+
+    let right_pos = top_left + egui::vec2(left_width + spacing, 0.0);
+    let right_rect = egui::Rect::from_min_max(
+        right_pos,
+        egui::pos2(right_pos.x + right_width, max_bottom),
+    );
+    let mut right_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(right_rect)
+            .layout(egui::Layout::top_down_justified(egui::Align::LEFT)),
+    );
+    right_ui.set_width(right_width);
+
+    let result = add_contents(&mut left_ui, &mut right_ui);
+
+    let total_height = max_bottom - top_left.y;
+    ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+        top_left,
+        egui::vec2(ui.available_width(), total_height),
+    ));
+    result
+}
+
 // MARK: - eframe App Implementation
 impl eframe::App for ViewerApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -1511,30 +1557,15 @@ impl eframe::App for ViewerApp {
 
                 // Main Viewer area (Tree on left 70%, Property Grid on right 30% if open)
                 if self.show_props {
-                    let total_w = ui.available_width();
-                    let spacing = ui.spacing().item_spacing.x;
-                    let props_w = ((total_w - spacing) * 0.30).clamp(180.0, 480.0);
-                    let tree_w = (total_w - spacing - props_w).max(100.0);
-
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(tree_w, ui.available_height()),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.group(|ui| {
-                                    self.show_tree_view(ctx, ui);
-                                });
-                            },
-                        );
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(props_w, ui.available_height()),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.group(|ui| {
-                                    self.show_property_grid(ctx, ui);
-                                });
-                            },
-                        );
+                    show_two_columns_70_30(ui, |tree_ui, props_ui| {
+                        tree_ui.group(|ui| {
+                            ui.set_min_size(ui.available_size());
+                            self.show_tree_view(ctx, ui);
+                        });
+                        props_ui.group(|ui| {
+                            ui.set_min_size(ui.available_size());
+                            self.show_property_grid(ctx, ui);
+                        });
                     });
                 } else {
                     self.show_tree_view(ctx, ui);
@@ -1552,7 +1583,10 @@ impl eframe::App for ViewerApp {
                     .desired_width(f32::INFINITY)
                     .font(font);
 
-                let resp = egui::ScrollArea::both().show(ui, |ui| ui.add(text_edit)).inner;
+                let resp = egui::ScrollArea::both()
+                    .id_salt("text_editor_scroll_area")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| ui.add(text_edit)).inner;
 
                 if resp.changed() {
                     self.doc.raw_text = self.editor_text.clone();
@@ -1585,7 +1619,10 @@ impl eframe::App for ViewerApp {
                             .desired_width(f32::INFINITY)
                             .font(font);
 
-                        let resp = egui::ScrollArea::both().show(left, |ui| ui.add(text_edit)).inner;
+                        let resp = egui::ScrollArea::both()
+                            .id_salt("split_editor_scroll_area")
+                            .auto_shrink([false, false])
+                            .show(left, |ui| ui.add(text_edit)).inner;
 
                         if resp.changed() {
                             self.doc.raw_text = self.split_text.clone();
@@ -1608,30 +1645,15 @@ impl eframe::App for ViewerApp {
                         }
 
                         if self.show_props {
-                            let total_w = right.available_width();
-                            let spacing = right.spacing().item_spacing.x;
-                            let props_w = ((total_w - spacing) * 0.30).clamp(150.0, 360.0);
-                            let tree_w = (total_w - spacing - props_w).max(100.0);
-
-                            right.horizontal(|ui| {
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(tree_w, ui.available_height()),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        ui.group(|ui| {
-                                            self.show_tree_view(ctx, ui);
-                                        });
-                                    },
-                                );
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(props_w, ui.available_height()),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        ui.group(|ui| {
-                                            self.show_property_grid(ctx, ui);
-                                        });
-                                    },
-                                );
+                            show_two_columns_70_30(right, |tree_ui, props_ui| {
+                                tree_ui.group(|ui| {
+                                    ui.set_min_size(ui.available_size());
+                                    self.show_tree_view(ctx, ui);
+                                });
+                                props_ui.group(|ui| {
+                                    ui.set_min_size(ui.available_size());
+                                    self.show_property_grid(ctx, ui);
+                                });
                             });
                         } else {
                             self.show_tree_view(ctx, right);
