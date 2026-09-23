@@ -735,7 +735,9 @@ impl ViewerApp {
         let mut expand_subtree_path: Option<String> = None;
         let mut collapse_subtree_path: Option<String> = None;
 
-        let mut scroll_area = egui::ScrollArea::both().auto_shrink([false, false]);
+        let mut scroll_area = egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
         // When a search match or node navigation reveals a row, center it in the viewport once:
         if let Some(target_path) = self.doc.requested_scroll_path.take() {
@@ -749,7 +751,9 @@ impl ViewerApp {
                 let row_pitch = row_height + ui.spacing().item_spacing.y;
                 let target_y = idx as f32 * row_pitch;
                 let target_offset = (target_y - (viewport_h - row_height) * 0.5).max(0.0);
-                scroll_area = scroll_area.vertical_scroll_offset(target_offset);
+                scroll_area = scroll_area
+                    .vertical_scroll_offset(target_offset)
+                    .horizontal_scroll_offset(0.0);
             }
         }
 
@@ -894,6 +898,7 @@ impl ViewerApp {
         // Two-column table: Name | Value
         egui::ScrollArea::both()
             .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
                 egui::Grid::new("property_grid_table")
                     .striped(true)
@@ -1000,6 +1005,7 @@ impl ViewerApp {
                 if ui.checkbox(&mut self.settings.escape_slashes_in_stringify, "Escape forward slashes (\\/) when stringifying").changed() { save = true; }
                 if ui.checkbox(&mut self.settings.auto_unwrap_stringified, "Auto-unwrap stringified JSON").changed() { save = true; }
                 if ui.checkbox(&mut self.settings.wrap_lines, "Wrap long lines in editor").changed() { save = true; }
+                if ui.checkbox(&mut self.settings.natural_scrolling, "Natural scrolling (trackpad style)").changed() { save = true; }
 
                 ui.horizontal(|ui| {
                     ui.label("Default Tab:");
@@ -1366,15 +1372,44 @@ fn config_path() -> std::path::PathBuf {
 
 // MARK: - eframe App Implementation
 impl eframe::App for ViewerApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        for event in &mut raw_input.events {
+            if let egui::Event::MouseWheel { delta, modifiers, .. } = event {
+                // Standard/traditional mouse wheel scrolling:
+                // Invert vertical delta so rolling wheel downwards moves down the content.
+                if !self.settings.natural_scrolling {
+                    delta.y = -delta.y;
+                }
+
+                // Independent scrolling / Axis-locking:
+                // Isolate the dominant axis so vertical scrolling never causes horizontal drift,
+                // and horizontal scrolling never causes vertical drift.
+                if modifiers.shift {
+                    delta.y = 0.0;
+                } else if delta.y.abs() >= delta.x.abs() {
+                    delta.x = 0.0;
+                } else {
+                    delta.y = 0.0;
+                }
+            }
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.initialized {
             self.initialized = true;
+            let mut style = (*ctx.style()).clone();
+            style.spacing.scroll.dormant_handle_opacity = 0.6;
+            style.spacing.scroll.dormant_background_opacity = 0.2;
+            style.spacing.scroll.floating_allocated_width = 8.0;
+            style.spacing.scroll.bar_width = 8.0;
+            ctx.set_style(style);
+
             self.doc.active_tab = match self.settings.default_tab.as_str() {
                 "Viewer" => AppTab::Viewer,
                 "Split" => AppTab::Split,
                 _ => AppTab::Text,
             };
-            ctx.request_repaint();
         }
 
         // Handle dropped files from file manager (Nautilus, Dolphin, etc.)
@@ -1474,15 +1509,32 @@ impl eframe::App for ViewerApp {
                     ui.separator();
                 }
 
-                // Main Viewer area (Tree on left, Property Grid on right if open)
+                // Main Viewer area (Tree on left 70%, Property Grid on right 30% if open)
                 if self.show_props {
-                    ui.columns(2, |cols| {
-                        cols[0].group(|ui| {
-                            self.show_tree_view(ctx, ui);
-                        });
-                        cols[1].group(|ui| {
-                            self.show_property_grid(ctx, ui);
-                        });
+                    let total_w = ui.available_width();
+                    let spacing = ui.spacing().item_spacing.x;
+                    let props_w = ((total_w - spacing) * 0.30).clamp(180.0, 480.0);
+                    let tree_w = (total_w - spacing - props_w).max(100.0);
+
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(tree_w, ui.available_height()),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.group(|ui| {
+                                    self.show_tree_view(ctx, ui);
+                                });
+                            },
+                        );
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(props_w, ui.available_height()),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.group(|ui| {
+                                    self.show_property_grid(ctx, ui);
+                                });
+                            },
+                        );
                     });
                 } else {
                     self.show_tree_view(ctx, ui);
@@ -1556,13 +1608,30 @@ impl eframe::App for ViewerApp {
                         }
 
                         if self.show_props {
-                            right.columns(2, |subcols| {
-                                subcols[0].group(|ui| {
-                                    self.show_tree_view(ctx, ui);
-                                });
-                                subcols[1].group(|ui| {
-                                    self.show_property_grid(ctx, ui);
-                                });
+                            let total_w = right.available_width();
+                            let spacing = right.spacing().item_spacing.x;
+                            let props_w = ((total_w - spacing) * 0.30).clamp(150.0, 360.0);
+                            let tree_w = (total_w - spacing - props_w).max(100.0);
+
+                            right.horizontal(|ui| {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(tree_w, ui.available_height()),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.group(|ui| {
+                                            self.show_tree_view(ctx, ui);
+                                        });
+                                    },
+                                );
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(props_w, ui.available_height()),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.group(|ui| {
+                                            self.show_property_grid(ctx, ui);
+                                        });
+                                    },
+                                );
                             });
                         } else {
                             self.show_tree_view(ctx, right);

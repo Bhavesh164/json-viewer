@@ -97,6 +97,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        vsync: false,
+        run_and_return: false,
         ..Default::default()
     };
 
@@ -105,6 +107,12 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             setup_fonts(&cc.egui_ctx);
+            let mut style = (*cc.egui_ctx.style()).clone();
+            style.spacing.scroll.dormant_handle_opacity = 0.6;
+            style.spacing.scroll.dormant_background_opacity = 0.2;
+            style.spacing.scroll.floating_allocated_width = 8.0;
+            style.spacing.scroll.bar_width = 8.0;
+            cc.egui_ctx.set_style(style);
             Ok(Box::new(ViewerApp::new(settings, initial)))
         }),
     );

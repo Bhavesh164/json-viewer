@@ -19,6 +19,8 @@ pub struct Settings {
     pub default_tab: String,
     pub font_size: f64,
     pub wrap_lines: bool,
+    #[serde(default)]
+    pub natural_scrolling: bool,
 }
 
 impl Default for Settings {
@@ -31,6 +33,7 @@ impl Default for Settings {
             default_tab: "Text".to_string(),
             font_size: 13.0,
             wrap_lines: true,
+            natural_scrolling: false,
         }
     }
 }

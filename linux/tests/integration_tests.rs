@@ -334,4 +334,106 @@ fn search_next_previous_cycling_expands_and_scrolls() {
     assert!(m.visible_tree_rows.iter().any(|r| r.path == first_target));
 }
 
+#[test]
+fn mouse_wheel_scroll_direction_inverts_when_not_natural() {
+    use eframe::App;
+
+    let s = Settings::default();
+    assert!(!s.natural_scrolling, "Natural scrolling must be false by default for traditional mouse scrolling");
+
+    let mut app = ViewerApp::new(s, None);
+    let ctx = egui::Context::default();
+
+    // Test with natural_scrolling = false (default)
+    let mut raw_input = egui::RawInput::default();
+    raw_input.events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -5.0),
+        modifiers: egui::Modifiers::default(),
+    });
+
+    app.raw_input_hook(&ctx, &mut raw_input);
+
+    match &raw_input.events[0] {
+        egui::Event::MouseWheel { delta, .. } => {
+            assert_eq!(delta.y, 5.0, "Vertical delta should be inverted to produce traditional scroll direction");
+        }
+        _ => panic!("Expected MouseWheel event"),
+    }
+
+    // Test with natural_scrolling = true
+    app.settings.natural_scrolling = true;
+    let mut raw_input2 = egui::RawInput::default();
+    raw_input2.events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -5.0),
+        modifiers: egui::Modifiers::default(),
+    });
+
+    app.raw_input_hook(&ctx, &mut raw_input2);
+
+    match &raw_input2.events[0] {
+        egui::Event::MouseWheel { delta, .. } => {
+            assert_eq!(delta.y, -5.0, "Vertical delta should not be inverted when natural scrolling is explicitly enabled");
+        }
+        _ => panic!("Expected MouseWheel event"),
+    }
+
+    // Test independent scrolls (axis-locking):
+    // Vertical swipe with horizontal drift should zero out horizontal drift
+    app.settings.natural_scrolling = false;
+    let mut raw_input3 = egui::RawInput::default();
+    raw_input3.events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(1.5, -8.0),
+        modifiers: egui::Modifiers::default(),
+    });
+
+    app.raw_input_hook(&ctx, &mut raw_input3);
+
+    match &raw_input3.events[0] {
+        egui::Event::MouseWheel { delta, .. } => {
+            assert_eq!(delta.x, 0.0, "Horizontal drift must be locked to 0 during vertical scroll");
+            assert_eq!(delta.y, 8.0, "Vertical delta should be inverted and active");
+        }
+        _ => panic!("Expected MouseWheel event"),
+    }
+
+    // Horizontal swipe with vertical drift should zero out vertical drift
+    let mut raw_input4 = egui::RawInput::default();
+    raw_input4.events.push(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(10.0, -1.0),
+        modifiers: egui::Modifiers::default(),
+    });
+
+    app.raw_input_hook(&ctx, &mut raw_input4);
+
+    match &raw_input4.events[0] {
+        egui::Event::MouseWheel { delta, .. } => {
+            assert_eq!(delta.x, 10.0, "Horizontal delta should be preserved");
+            assert_eq!(delta.y, 0.0, "Vertical drift must be locked to 0 during horizontal scroll");
+        }
+        _ => panic!("Expected MouseWheel event"),
+    }
+
+}
+
+#[test]
+fn settings_deserializes_legacy_config_without_natural_scrolling() {
+    let legacy_json = r#"{
+        "indentSpaces": 4,
+        "sortKeysAlphabetically": true,
+        "escapeSlashesInStringify": false,
+        "autoUnwrapStringified": false,
+        "defaultTab": "Viewer",
+        "fontSize": 15.0,
+        "wrapLines": false
+    }"#;
+
+    let s: Settings = serde_json::from_str(legacy_json).expect("Must deserialize legacy config");
+    assert_eq!(s.indent_spaces, 4);
+    assert!(!s.natural_scrolling, "Legacy configs without naturalScrolling field must default to false");
+}
+
 
