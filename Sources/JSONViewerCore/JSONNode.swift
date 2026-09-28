@@ -7,6 +7,12 @@ public final class JSONNode: Identifiable, ObservableObject, @unchecked Sendable
     public let key: String
     public let value: JSONValue
     public let path: String
+    /// Lazily cached because Swift's grapheme count can be expensive for long
+    /// strings, and visible tree rows may ask for it repeatedly while laying out.
+    public lazy var stringCharacterCount: Int? = {
+        guard case .string(let string) = value else { return nil }
+        return string.count
+    }()
     public var children: [JSONNode]?
     public weak var parent: JSONNode?
     

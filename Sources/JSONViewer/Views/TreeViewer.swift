@@ -197,7 +197,7 @@ struct FlatTreeNodeRow: View, Equatable {
         let charWidth = fontSize * 0.62
         let leadingIndent = CGFloat(row.depth * 18)
         let iconsAndSpacing = 18.0 + max(16.0, fontSize + 4.0) + 8.0
-        let totalTextChars = CGFloat(row.node.key.count + 3 + s.count + 2) // key + " : " + '"' + s + '"'
+        let totalTextChars = CGFloat(row.node.key.count + 3 + (row.node.stringCharacterCount ?? 0) + 2) // key + " : " + '"' + s + '"'
         let requiredWidth = leadingIndent + iconsAndSpacing + (totalTextChars * charWidth)
         let availableWidth = max(200.0, viewportWidth - 48.0)
         return requiredWidth > availableWidth
@@ -336,7 +336,7 @@ struct FlatTreeNodeRow: View, Equatable {
                         .controlSize(.mini)
                         
                         if case .string(let str) = row.node.value {
-                            Text("\(str.count) chars")
+                            Text("\(row.node.stringCharacterCount ?? str.count) chars")
                                 .font(.system(size: max(8, fontSize - 3), design: .monospaced))
                                 .foregroundColor(.secondary.opacity(0.6))
                         }
