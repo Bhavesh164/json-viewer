@@ -21,6 +21,8 @@ public final class JSONDocumentModel: ObservableObject {
     }
     
     @Published public private(set) var treeVersion: Int = 0
+    /// Incremented after a node has been expanded and selected for tree navigation.
+    @Published public private(set) var treeNavigationRequest: Int = 0
     
     @Published public var activeTab: AppTab = .text {
         didSet {
@@ -601,20 +603,8 @@ public final class JSONDocumentModel: ObservableObject {
     private func selectMatch(at index: Int) {
         guard index >= 0 && index < searchResults.count else { return }
         let target = searchResults[index]
-        self.selectedNode = target
-        
-        // Expand all ancestors to make node visible (only rebuild rows if newly expanded!)
-        var didExpandAncestors = false
-        for ancestorId in target.ancestorIds {
-            if !expandedNodeIds.contains(ancestorId) {
-                expandedNodeIds.insert(ancestorId)
-                didExpandAncestors = true
-            }
-        }
-        if didExpandAncestors {
-            updateVisibleRows()
-        }
-        
+        selectAndReveal(node: target)
+
         self.searchStatus = "\(index + 1) of \(searchResults.count) matches"
     }
     
@@ -756,6 +746,9 @@ public final class JSONDocumentModel: ObservableObject {
             updateVisibleRows()
         }
         self.selectedNode = node
+        // Signal after expanding ancestors and rebuilding rows so the view can
+        // scroll once the lazy row is part of the visible tree.
+        self.treeNavigationRequest += 1
     }
     
     public func navigateToParent() {

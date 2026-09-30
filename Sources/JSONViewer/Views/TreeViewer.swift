@@ -114,10 +114,13 @@ public struct TreeViewer: View {
                             .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
                         }
                         .background(Color(nsColor: .textBackgroundColor))
-                        .onChange(of: model.selectedNode?.id) { selectedId in
-                            if let selectedId = selectedId {
+                        .onChange(of: model.treeNavigationRequest) { _ in
+                            guard let selectedId = model.selectedNode?.id else { return }
+                            let destination = "\(model.treeVersion):\(selectedId)"
+                            // Wait for SwiftUI to lay out the newly expanded lazy row.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                 withAnimation(.easeInOut(duration: 0.15)) {
-                                    proxy.scrollTo("\(model.treeVersion):\(selectedId)", anchor: .center)
+                                    proxy.scrollTo(destination, anchor: .center)
                                 }
                             }
                         }

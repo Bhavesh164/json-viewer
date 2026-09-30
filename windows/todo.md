@@ -1,5 +1,11 @@
 # Windows follow-up
 
+## Search and Properties navigation
+
+- When Enter, Go, Next, Previous, or a Properties row selects a match, expand its ancestors before scrolling the tree to that node.
+- Trigger scrolling after the expanded rows have been rebuilt so virtualized tree rows can be found reliably.
+- Verify with a match near the beginning of a large pasted JSON document while the tree is scrolled far down.
+
 ## Split mode tree while editing
 
 - Mark the tree as out of date as soon as the editor text changes while split mode is active.
