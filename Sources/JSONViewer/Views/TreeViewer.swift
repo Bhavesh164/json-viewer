@@ -76,6 +76,13 @@ public struct TreeViewer: View {
                 .help("Zoom In (Cmd +)")
                 
                 Spacer()
+
+                if model.activeTab == .split && model.isDirty && model.rootNode != nil {
+                    Label("Out of date", systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.orange)
+                        .help("This tree shows the last valid JSON. It will update when the editor contains valid JSON.")
+                }
                 
                 if let selected = model.selectedNode {
                     Text(selected.path)
