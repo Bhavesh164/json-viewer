@@ -61,7 +61,10 @@ linux/
   Python dictionary (Copy dropdown).
 - **Search** — query box with Go / Prev / Next, `N of M matches` status,
   Enter/Shift+Enter navigation, Esc to clear; matches auto-expand ancestors
-  and reveal the node.
+  and reveal the node. Matching runs on a cancellable background thread
+  (`Searching…` while it works) so editing or clearing the query stays
+  responsive on large documents, and results from canceled or outdated
+  queries are discarded. Clearing search returns the tree to its root.
 - **File I/O** — Open / Save `.json` via native portal dialogs
   (`Ctrl+O`/`Ctrl+S`). CLI also accepts a file path:
   `jsonviewer data.json`.
@@ -142,8 +145,9 @@ cd linux && make package
 # Or from repository root:
 make -C linux package
 ```
-This generates two artifacts in `linux/target/release/`:
+This generates three artifacts in `linux/target/release/`:
 - **`jsonviewer-linux-x86_64.tar.gz`** (~6 MB) — Recommended release archive containing the self-contained binary `jsonviewer`, `jsonviewer.desktop` entry, and application icons.
+- **`jsonviewer-linux-x86_64.zip`** — Same contents as the `.tar.gz` archive, for systems without `tar` (needs the `zip` command; skipped with a warning when unavailable).
 - **`jsonviewer-linux-x86_64`** (~11.8 MB) — Standalone single executable (copy and run directly).
 
 > [!NOTE]
@@ -180,14 +184,16 @@ cd linux && cargo test
 
 When publishing a new release on GitHub, upload these files from `linux/target/release/`:
 1. **`jsonviewer-linux-x86_64.tar.gz`** (Primary download)
-2. **`jsonviewer-linux-x86_64`** (Optional standalone single-binary download)
+2. **`jsonviewer-linux-x86_64.zip`** (Alternative archive)
+3. **`jsonviewer-linux-x86_64`** (Optional standalone single-binary download)
 
 ### How End-Users Run It on Any Linux Machine
 
 No installation or dependencies required:
 ```sh
-# Extract and launch
+# Extract and launch (tar.gz or zip)
 tar -xzf jsonviewer-linux-x86_64.tar.gz
+unzip jsonviewer-linux-x86_64.zip
 ./jsonviewer
 
 # (Optional) Register desktop launcher in system app menus

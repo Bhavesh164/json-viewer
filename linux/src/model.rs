@@ -9,15 +9,22 @@
 use crate::json::{unescape_stringified_json, JSONParseError, JSONParser, JSONValue};
 use crate::python::parse_python_literal;
 use crate::settings::Settings;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
 pub const SAMPLE_JSON: &str = "{\n  \"title\": \"JSON Viewer macOS\",\n  \"version\": \"1.0.0\",\n  \"description\": \"Native Mac JSON Viewer & Formatter\",\n  \"active\": true,\n  \"rating\": 4.95,\n  \"nullProperty\": null,\n  \"author\": {\n    \"name\": \"Antigravity & Stack.hu\",\n    \"email\": \"local@mac.internal\"\n  },\n  \"features\": [\n    \"Hierarchical Tree View\",\n    \"Property Grid Inspection\",\n    \"2-Space Indented Formatting\",\n    \"Whitespace Minification\",\n    \"Remote URL Loading\",\n    \"Full Key & Value Search\"\n  ],\n  \"statistics\": {\n    \"downloads\": 12840,\n    \"stars\": 892\n  }\n}";
 
 #[derive(Clone, Debug)]
 pub struct Node {
+    /// Stable, unique internal identifier. Matches `path` unless the document
+    /// contains repeated object keys, where extra `#2`, `#3`, … suffixes are
+    /// appended so every member keeps its own identity.
+    pub id: String,
     pub key: String,
     pub value: JSONValue,
+    /// JSON path shown to the user. Not unique when object keys repeat.
     pub path: String,
     pub children: Vec<Node>,
 }
@@ -25,7 +32,7 @@ pub struct Node {
 #[allow(dead_code)]
 impl Node {
     pub fn id(&self) -> &str {
-        &self.path
+        &self.id
     }
 
     pub fn is_leaf(&self) -> bool {
@@ -142,34 +149,54 @@ impl Node {
     }
 
     pub fn build_tree(value: &JSONValue, root_key: &str) -> Node {
-        build_node(root_key, value, "$")
+        let mut used_ids: HashSet<String> = HashSet::new();
+        build_node(root_key, value, "$", "$", &mut used_ids)
     }
 }
 
-fn build_node(key: &str, value: &JSONValue, path: &str) -> Node {
+fn build_node(key: &str, value: &JSONValue, path: &str, id: &str, used_ids: &mut HashSet<String>) -> Node {
     match value {
         JSONValue::Object(pairs) => {
-            let children = pairs
-                .iter()
-                .map(|p| {
-                    let child_path = format!("{}.{}", path, p.key);
-                    build_node(&p.key, &p.value, &child_path)
-                })
-                .collect();
-            Node { key: key.to_string(), value: value.clone(), path: path.to_string(), children }
+            let mut children = Vec::with_capacity(pairs.len());
+            for p in pairs {
+                let child_path = format!("{}.{}", path, p.key);
+                let candidate = if id == path { child_path.clone() } else { format!("{}.{}", id, p.key) };
+                let child_id = unique_id(candidate, used_ids);
+                children.push(build_node(&p.key, &p.value, &child_path, &child_id, used_ids));
+            }
+            Node { id: id.to_string(), key: key.to_string(), value: value.clone(), path: path.to_string(), children }
         }
         JSONValue::Array(items) => {
-            let children = items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let child_path = format!("{}[{}]", path, i);
-                    build_node(&i.to_string(), item, &child_path)
-                })
-                .collect();
-            Node { key: key.to_string(), value: value.clone(), path: path.to_string(), children }
+            let mut children = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let child_path = format!("{}[{}]", path, i);
+                let candidate = if id == path { child_path.clone() } else { format!("{}[{}]", id, i) };
+                let child_id = unique_id(candidate, used_ids);
+                children.push(build_node(&i.to_string(), item, &child_path, &child_id, used_ids));
+            }
+            Node { id: id.to_string(), key: key.to_string(), value: value.clone(), path: path.to_string(), children }
         }
-        _ => Node { key: key.to_string(), value: value.clone(), path: path.to_string(), children: Vec::new() },
+        _ => Node {
+            id: id.to_string(),
+            key: key.to_string(),
+            value: value.clone(),
+            path: path.to_string(),
+            children: Vec::new(),
+        },
+    }
+}
+
+fn unique_id(candidate: String, used_ids: &mut HashSet<String>) -> String {
+    if used_ids.insert(candidate.clone()) {
+        return candidate;
+    }
+    let mut occurrence = 2usize;
+    loop {
+        let deduped = format!("{}#{}", candidate, occurrence);
+        if used_ids.insert(deduped.clone()) {
+            return deduped;
+        }
+        occurrence += 1;
     }
 }
 
@@ -178,8 +205,16 @@ pub struct PropertyRow {
     pub name: String,
     pub value: String,
     pub typ: String,
+    pub id: String,
     pub path: String,
     pub is_container: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParentInfo {
+    pub id: String,
+    pub path: String,
+    pub key: String,
 }
 
 /// Char-boundary-safe truncation with an ellipsis marker.
@@ -207,6 +242,7 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// Virtualization renders only rows intersecting the current viewport.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlatTreeRow {
+    pub id: String,
     pub path: String,
     pub key: String,
     pub depth: usize,
@@ -242,10 +278,12 @@ pub struct DocumentModel {
     pub raw_text: String,
     pub json_value: Option<JSONValue>,
     pub root: Option<Arc<Node>>,
-    pub selected_path: Option<String>,
+    /// Unique node ID of the selection (see [`Node::id`]).
+    pub selected_id: Option<String>,
     pub parse_error: Option<JSONParseError>,
     pub error_message: String,
     pub search_query: String,
+    /// Node IDs of the matches, in document order.
     pub search_results: Vec<String>,
     pub search_result_ids: HashSet<String>,
     pub current_search_index: usize,
@@ -259,16 +297,43 @@ pub struct DocumentModel {
     pub expanded_leaf_nodes: HashSet<String>,
     pub visible_tree_rows: Vec<FlatTreeRow>,
     pub tree_version: usize,
-    pub requested_scroll_path: Option<String>,
+    /// Incremented after a node has been expanded and selected for tree
+    /// navigation so the view can scroll once the rebuilt rows are available.
+    pub tree_navigation_request: usize,
+    pub requested_scroll_id: Option<String>,
+    /// Incremented when clearing search should return the tree viewport to its root.
+    pub tree_scroll_to_top_request: usize,
+    /// Incremented on every successful parse; results computed against an older
+    /// tree are discarded instead of pointing at rows that no longer exist.
+    pub parse_generation: u64,
+    /// True while a background search is still running.
+    pub search_in_flight: bool,
+    /// `1` / `-1` when the user asked for the next / previous match before the
+    /// background search delivered its results.
+    pub pending_search_advance: i8,
+    search_generation: u64,
+    search_cancel: Arc<AtomicBool>,
+    search_tx: Sender<SearchCompletion>,
+    search_rx: Receiver<SearchCompletion>,
+}
+
+/// Result handed back by the background search worker.
+struct SearchCompletion {
+    generation: u64,
+    parse_generation: u64,
+    query: String,
+    matches: Vec<String>,
+    reverse: bool,
 }
 
 impl DocumentModel {
     pub fn new(settings: &Settings) -> Self {
+        let (search_tx, search_rx) = mpsc::channel();
         let mut m = Self {
             raw_text: SAMPLE_JSON.to_string(),
             json_value: None,
             root: None,
-            selected_path: None,
+            selected_id: None,
             parse_error: None,
             error_message: String::new(),
             search_query: String::new(),
@@ -285,7 +350,16 @@ impl DocumentModel {
             expanded_leaf_nodes: HashSet::new(),
             visible_tree_rows: Vec::new(),
             tree_version: 0,
-            requested_scroll_path: None,
+            tree_navigation_request: 0,
+            requested_scroll_id: None,
+            tree_scroll_to_top_request: 0,
+            parse_generation: 0,
+            search_in_flight: false,
+            pending_search_advance: 0,
+            search_generation: 0,
+            search_cancel: Arc::new(AtomicBool::new(false)),
+            search_tx,
+            search_rx,
         };
         let _ = m.parse_and_build_tree(true, settings);
         if let Some(v) = &m.json_value {
@@ -323,6 +397,12 @@ impl DocumentModel {
     }
 
     pub fn parse_and_build_tree(&mut self, silent: bool, settings: &Settings) -> bool {
+        // Keep the current navigation state and restore the parts that still
+        // exist after the rebuild (Split mode re-parses on every keystroke).
+        let previous_selection_id = self.selected_id.clone();
+        let previous_selection_path = self.selected_node().map(|n| n.path.clone());
+        let previous_expanded = self.expanded_nodes.clone();
+        let previous_expanded_leaf = self.expanded_leaf_nodes.clone();
         let trimmed = self.raw_text.trim();
         if trimmed.is_empty() {
             if !silent {
@@ -384,16 +464,59 @@ impl DocumentModel {
         }
 
         let root = Node::build_tree(&parsed, "JSON");
-        let root_path = root.path.clone();
-        self.selected_path = Some(root_path.clone());
+        let root_id = root.id.clone();
+
+        // Index the fresh tree so navigation state can be restored by ID, and
+        // fall back to the JSON path when a repeated key changed its suffix.
+        let mut nodes_by_id: HashSet<String> = HashSet::new();
+        let mut nodes_by_path: HashMap<String, String> = HashMap::new();
+        let mut container_ids: HashSet<String> = HashSet::new();
+        let mut leaf_ids: HashSet<String> = HashSet::new();
+        {
+            let mut stack = vec![&root];
+            while let Some(node) = stack.pop() {
+                nodes_by_id.insert(node.id.clone());
+                nodes_by_path.entry(node.path.clone()).or_insert_with(|| node.id.clone());
+                if node.is_container() {
+                    container_ids.insert(node.id.clone());
+                } else {
+                    leaf_ids.insert(node.id.clone());
+                }
+                for child in &node.children {
+                    stack.push(child);
+                }
+            }
+        }
+
+        // Restore the selection when its node still exists, else fall back to root.
+        let restored_selection = previous_selection_id
+            .filter(|id| nodes_by_id.contains(id))
+            .or_else(|| {
+                previous_selection_path
+                    .and_then(|p| nodes_by_path.get(&p).cloned())
+            })
+            .unwrap_or_else(|| root_id.clone());
+
         self.json_value = Some(parsed);
         self.root = Some(Arc::new(root));
         self.parse_error = None;
         self.is_dirty = false;
+        self.parse_generation += 1;
 
-        // macOS parity: initially ONLY root container is expanded
-        self.expanded_nodes.clear();
-        self.expanded_nodes.insert(root_path);
+        self.selected_id = Some(restored_selection);
+
+        // Collapse branches that disappeared instead of keeping stale IDs.
+        self.expanded_nodes = previous_expanded
+            .into_iter()
+            .filter(|id| container_ids.contains(id))
+            .collect();
+        self.expanded_leaf_nodes = previous_expanded_leaf
+            .into_iter()
+            .filter(|id| leaf_ids.contains(id))
+            .collect();
+        // macOS parity: the root container always stays expanded.
+        self.expanded_nodes.insert(root_id);
+        self.rebuild_search_results();
         self.update_visible_rows();
         true
     }
@@ -405,9 +528,9 @@ impl DocumentModel {
         let mut stack: Vec<(&Node, usize)> = vec![(root.as_ref(), 0)];
         while let Some((node, depth)) = stack.pop() {
             let is_container = node.is_container();
-            let is_expanded = self.expanded_nodes.contains(&node.path);
-            let is_leaf_expanded = self.expanded_leaf_nodes.contains(&node.path);
-            let is_match = self.search_result_ids.contains(&node.path);
+            let is_expanded = self.expanded_nodes.contains(&node.id);
+            let is_leaf_expanded = self.expanded_leaf_nodes.contains(&node.id);
+            let is_match = self.search_result_ids.contains(&node.id);
             let is_long = node.is_long_text();
             let (full_str, char_count) = match &node.value {
                 JSONValue::Str(s) => (Some(s.clone()), s.chars().count()),
@@ -415,6 +538,7 @@ impl DocumentModel {
             };
 
             let row = FlatTreeRow {
+                id: node.id.clone(),
                 path: node.path.clone(),
                 key: node.key.clone(),
                 depth,
@@ -440,20 +564,20 @@ impl DocumentModel {
         self.tree_version += 1;
     }
 
-    pub fn toggle_expand(&mut self, path: &str) {
-        if self.expanded_nodes.contains(path) {
-            self.expanded_nodes.remove(path);
+    pub fn toggle_expand(&mut self, id: &str) {
+        if self.expanded_nodes.contains(id) {
+            self.expanded_nodes.remove(id);
         } else {
-            self.expanded_nodes.insert(path.to_string());
+            self.expanded_nodes.insert(id.to_string());
         }
         self.update_visible_rows();
     }
 
-    pub fn toggle_expand_leaf(&mut self, path: &str) {
-        if self.expanded_leaf_nodes.contains(path) {
-            self.expanded_leaf_nodes.remove(path);
+    pub fn toggle_expand_leaf(&mut self, id: &str) {
+        if self.expanded_leaf_nodes.contains(id) {
+            self.expanded_leaf_nodes.remove(id);
         } else {
-            self.expanded_leaf_nodes.insert(path.to_string());
+            self.expanded_leaf_nodes.insert(id.to_string());
         }
         self.update_visible_rows();
     }
@@ -464,7 +588,7 @@ impl DocumentModel {
             let mut count = 0usize;
             while let Some(n) = stack.pop() {
                 if n.is_container() {
-                    self.expanded_nodes.insert(n.path.clone());
+                    self.expanded_nodes.insert(n.id.clone());
                     count += 1;
                     if count > 80_000 {
                         break;
@@ -484,18 +608,18 @@ impl DocumentModel {
         self.expanded_nodes.clear();
         self.expanded_leaf_nodes.clear();
         if let Some(root) = &self.root {
-            self.expanded_nodes.insert(root.path.clone());
+            self.expanded_nodes.insert(root.id.clone());
         }
         self.update_visible_rows();
     }
 
-    pub fn expand_subtree(&mut self, path: &str) {
-        let paths: Vec<String> = if let Some(node) = self.find_node(path) {
+    pub fn expand_subtree(&mut self, id: &str) {
+        let paths: Vec<String> = if let Some(node) = self.find_node(id) {
             let mut stack = vec![node];
             let mut collected = Vec::new();
             while let Some(n) = stack.pop() {
                 if n.is_container() {
-                    collected.push(n.path.clone());
+                    collected.push(n.id.clone());
                     for c in &n.children {
                         if c.is_container() {
                             stack.push(c);
@@ -513,12 +637,12 @@ impl DocumentModel {
         self.update_visible_rows();
     }
 
-    pub fn collapse_subtree(&mut self, path: &str) {
-        let paths: Vec<String> = if let Some(node) = self.find_node(path) {
+    pub fn collapse_subtree(&mut self, id: &str) {
+        let paths: Vec<String> = if let Some(node) = self.find_node(id) {
             let mut stack = vec![node];
             let mut collected = Vec::new();
             while let Some(n) = stack.pop() {
-                collected.push(n.path.clone());
+                collected.push(n.id.clone());
                 for c in &n.children {
                     if c.is_container() {
                         stack.push(c);
@@ -535,31 +659,40 @@ impl DocumentModel {
         self.update_visible_rows();
     }
 
-    pub fn ensure_visible(&mut self, path: &str) {
-        if let Some((ancestors, true)) = self.find_with_ancestors(path) {
+    /// Expand the node's ancestors (and the node itself when it is a container)
+    /// so the row exists in `visible_tree_rows`, then signal the view to scroll.
+    pub fn ensure_visible(&mut self, id: &str) {
+        let mut did_expand = false;
+        if let Some((ancestors, _)) = self.find_with_ancestors(id) {
             for a in ancestors {
-                self.expanded_nodes.insert(a);
-            }
-            if let Some(node) = self.find_node(path) {
-                if node.is_container() {
-                    self.expanded_nodes.insert(path.to_string());
+                if self.expanded_nodes.insert(a) {
+                    did_expand = true;
                 }
             }
-            self.update_visible_rows();
+            if let Some(node) = self.find_node(id) {
+                if node.is_container() && self.expanded_nodes.insert(id.to_string()) {
+                    did_expand = true;
+                }
+            }
         } else if let Some(root) = &self.root {
-            if root.path == path {
-                self.expanded_nodes.insert(root.path.clone());
-                self.update_visible_rows();
+            if root.id == id && self.expanded_nodes.insert(root.id.clone()) {
+                did_expand = true;
             }
         }
+        if did_expand {
+            self.update_visible_rows();
+        }
+        // Signal after expanding ancestors and rebuilding rows so the view can
+        // scroll once the virtualized row is part of the visible tree.
+        self.tree_navigation_request += 1;
     }
 
     pub fn clear(&mut self) {
         self.raw_text.clear();
         self.json_value = None;
         self.root = None;
-        self.selected_path = None;
-        self.requested_scroll_path = None;
+        self.selected_id = None;
+        self.requested_scroll_id = None;
         self.parse_error = None;
         self.clear_search();
         self.expanded_nodes.clear();
@@ -746,25 +879,40 @@ impl DocumentModel {
 
     // MARK: - Tree queries
 
-    pub fn find_node(&self, path: &str) -> Option<&Node> {
-        self.root.as_ref().and_then(|r| find_in(r.as_ref(), path))
+    /// Currently selected node, if the selection still resolves.
+    pub fn selected_node(&self) -> Option<&Node> {
+        let id = self.selected_id.as_deref()?;
+        self.find_node(id)
     }
 
-    pub fn find_with_ancestors(&self, path: &str) -> Option<(Vec<String>, bool)> {
+    /// JSON path of the selection, shown in the tree toolbar.
+    pub fn selected_path(&self) -> Option<String> {
+        self.selected_node().map(|n| n.path.clone())
+    }
+
+    pub fn find_node(&self, id: &str) -> Option<&Node> {
+        self.root.as_ref().and_then(|r| find_by_id(r.as_ref(), id))
+    }
+
+    pub fn find_with_ancestors(&self, id: &str) -> Option<(Vec<String>, bool)> {
         let mut ancestors = Vec::new();
-        let found = collect_ancestors(self.root.as_ref()?.as_ref(), path, &mut ancestors);
-        if found { Some((ancestors, true)) } else { None }
+        let found = collect_ancestors(self.root.as_ref()?.as_ref(), id, &mut ancestors);
+        if found {
+            Some((ancestors, true))
+        } else {
+            None
+        }
     }
 
-    pub fn parent_of_selected(&self) -> Option<(String, String)> {
-        let sel = self.selected_path.as_deref()?;
+    pub fn parent_of_selected(&self) -> Option<ParentInfo> {
+        let sel = self.selected_id.as_deref()?;
         let root = self.root.as_ref()?;
         let parent = find_parent(root.as_ref(), sel)?;
-        Some((parent.path.clone(), parent.key.clone()))
+        Some(ParentInfo { id: parent.id.clone(), path: parent.path.clone(), key: parent.key.clone() })
     }
 
-    pub fn properties_for_selected(&self) -> (Option<(String, String)>, Vec<PropertyRow>) {
-        let sel = match &self.selected_path {
+    pub fn properties_for_selected(&self) -> (Option<ParentInfo>, Vec<PropertyRow>) {
+        let sel = match &self.selected_id {
             Some(p) => p.clone(),
             None => return (None, Vec::new()),
         };
@@ -772,12 +920,13 @@ impl DocumentModel {
             Some(r) => r,
             None => return (None, Vec::new()),
         };
-        let node = match find_in(root.as_ref(), &sel) {
+        let node = match find_by_id(root.as_ref(), &sel) {
             Some(n) => n,
             None => return (None, Vec::new()),
         };
 
-        let parent_info = find_parent(root.as_ref(), &sel).map(|p| (p.path.clone(), p.key.clone()));
+        let parent_info = find_parent(root.as_ref(), &sel)
+            .map(|p| ParentInfo { id: p.id.clone(), path: p.path.clone(), key: p.key.clone() });
 
         // Match macOS PropertyGridView: if container, show its children; if leaf, show siblings from parent
         let container: &Node = if node.is_container() {
@@ -792,6 +941,7 @@ impl DocumentModel {
                             name: node.key.clone(),
                             value: node.value_string_short(),
                             typ: node.value.type_name().to_string(),
+                            id: node.id.clone(),
                             path: node.path.clone(),
                             is_container: false,
                         }],
@@ -807,6 +957,7 @@ impl DocumentModel {
                     name: container.key.clone(),
                     value: container.value_string_short(),
                     typ: container.value.type_name().to_string(),
+                    id: container.id.clone(),
                     path: container.path.clone(),
                     is_container: container.is_container(),
                 }],
@@ -820,6 +971,7 @@ impl DocumentModel {
                 name: c.key.clone(),
                 value: c.value_string_short(),
                 typ: c.value.type_name().to_string(),
+                id: c.id.clone(),
                 path: c.path.clone(),
                 is_container: c.is_container(),
             })
@@ -829,21 +981,30 @@ impl DocumentModel {
     }
 
     pub fn navigate_to_parent(&mut self) {
-        if let Some((parent_path, _)) = self.parent_of_selected() {
-            self.selected_path = Some(parent_path.clone());
-            self.ensure_visible(&parent_path);
-            self.requested_scroll_path = Some(parent_path);
+        if let Some(parent) = self.parent_of_selected() {
+            self.selected_id = Some(parent.id.clone());
+            self.ensure_visible(&parent.id);
+            self.requested_scroll_id = Some(parent.id);
         }
     }
 
-    pub fn navigate_to_property(&mut self, path: &str) {
-        self.select_and_reveal(path);
+    pub fn navigate_to_property(&mut self, id: &str) {
+        self.select_and_reveal(id);
     }
 
-    pub fn select_and_reveal(&mut self, path: &str) {
-        self.selected_path = Some(path.to_string());
-        self.ensure_visible(path);
-        self.requested_scroll_path = Some(path.to_string());
+    pub fn select_and_reveal(&mut self, id: &str) {
+        self.selected_id = Some(id.to_string());
+        self.ensure_visible(id);
+        self.requested_scroll_id = Some(id.to_string());
+    }
+
+    /// Re-request a scroll to the current selection, e.g. when the tree
+    /// becomes visible again after editing in another tab.
+    pub fn request_scroll_to_selection(&mut self) {
+        if let Some(id) = self.selected_id.clone() {
+            self.requested_scroll_id = Some(id);
+            self.tree_navigation_request += 1;
+        }
     }
 
     pub fn status_text(&self) -> String {
@@ -863,53 +1024,151 @@ impl DocumentModel {
     // MARK: - Search
 
     pub fn clear_search(&mut self) {
+        self.cancel_search();
         self.search_query.clear();
         self.search_results.clear();
         self.search_result_ids.clear();
         self.search_status.clear();
         self.last_executed_query.clear();
-        self.requested_scroll_path = None;
+        self.requested_scroll_id = None;
         self.current_search_index = 0;
+        // The query is empty now, so the tree viewport belongs back at the root.
+        self.tree_scroll_to_top_request += 1;
         self.update_visible_rows();
     }
 
-    pub fn search_start(&mut self, settings: &Settings) {
+    /// Cancel the running search, if any. Outstanding completions are ignored
+    /// because the generation moved on.
+    fn cancel_search(&mut self) {
+        self.search_generation += 1;
+        self.search_cancel.store(true, Ordering::Relaxed);
+        self.search_in_flight = false;
+        self.pending_search_advance = 0;
+    }
+
+    /// Drop matches whose node IDs no longer exist after a re-parse and keep
+    /// the highlight set in sync.
+    fn rebuild_search_results(&mut self) {
+        if self.search_results.is_empty() {
+            self.search_result_ids.clear();
+            return;
+        }
+        let root = self.root.as_ref();
+        let mut kept: Vec<String> = Vec::with_capacity(self.search_results.len());
+        let mut seen: HashSet<String> = HashSet::new();
+        for id in self.search_results.drain(..) {
+            let exists = root
+                .as_ref()
+                .map(|r| !seen.contains(&id) && find_by_id_exists(r.as_ref(), &id))
+                .unwrap_or(false);
+            if exists && seen.insert(id.clone()) {
+                kept.push(id);
+            }
+        }
+        self.search_results = kept;
+        if self.current_search_index >= self.search_results.len() {
+            self.current_search_index = self.search_results.len().saturating_sub(1);
+        }
+        self.search_result_ids = self.search_results.iter().cloned().collect();
+    }
+
+    /// Select the match at `index`, expanding its ancestors and asking the view
+    /// to scroll to it.
+    fn select_match(&mut self, index: usize) {
+        let target = match self.search_results.get(index) {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        self.current_search_index = index;
+        self.select_and_reveal(&target);
+        self.search_status = format!("{} of {} matches", index + 1, self.search_results.len());
+    }
+
+    /// Start a search on a cancellable background task so clearing or editing
+    /// the query stays responsive on large documents.
+    pub fn search_start(&mut self, settings: &Settings, reverse: bool) {
         let query = self.search_query.trim().to_string();
         if query.is_empty() {
             self.clear_search();
             return;
         }
+
+        self.cancel_search();
+        let generation = self.search_generation;
         self.last_executed_query = query.clone();
-        if self.root.is_none() {
-            if !self.parse_and_build_tree(true, settings) {
-                self.search_status = "Phrase not found!".to_string();
-                self.requested_scroll_path = None;
-                return;
-            }
+
+        if self.root.is_none() && !self.parse_and_build_tree(true, settings) {
+            self.search_status = "Phrase not found!".to_string();
+            self.requested_scroll_id = None;
+            return;
         }
         let root = match &self.root {
             Some(r) => r.clone(),
             None => {
                 self.search_status = "Phrase not found!".to_string();
-                self.requested_scroll_path = None;
+                self.requested_scroll_id = None;
                 return;
             }
         };
-        let matches = search_in(root.as_ref(), &query);
-        self.search_results = matches;
+
+        let parse_generation = self.parse_generation;
+        self.search_results.clear();
+        self.search_result_ids.clear();
+        self.current_search_index = 0;
+        self.search_status = "Searching\u{2026}".to_string();
+        self.search_in_flight = true;
+
+        self.search_cancel.store(false, Ordering::Relaxed);
+        let cancel = self.search_cancel.clone();
+        let worker_query = query.clone();
+        let tx = self.search_tx.clone();
+        std::thread::spawn(move || {
+            let matches = search_nodes(root.as_ref(), &worker_query, &cancel);
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = tx.send(SearchCompletion { generation, parse_generation, query: worker_query, matches, reverse });
+        });
+    }
+
+    /// Apply finished background searches. Results from canceled, edited, or
+    /// outdated queries are discarded.
+    pub fn poll_search_results(&mut self) {
+        let mut latest: Option<SearchCompletion> = None;
+        while let Ok(completion) = self.search_rx.try_recv() {
+            latest = Some(completion);
+        }
+        let Some(completion) = latest else { return };
+        if completion.generation != self.search_generation
+            || completion.parse_generation != self.parse_generation
+            || completion.query != self.search_query.trim()
+        {
+            return;
+        }
+        self.search_in_flight = false;
+
+        let advance = self.pending_search_advance;
+        self.pending_search_advance = 0;
+        self.search_results = completion.matches;
         self.search_result_ids = self.search_results.iter().cloned().collect();
 
         if self.search_results.is_empty() {
-            self.search_status = "Phrase not found!".to_string();
-            self.requested_scroll_path = None;
-        } else {
             self.current_search_index = 0;
-            let target = self.search_results[0].clone();
-            self.selected_path = Some(target.clone());
-            self.ensure_visible(&target);
-            self.requested_scroll_path = Some(target);
-            self.search_status = format!("1 of {} matches", self.search_results.len());
+            self.search_status = "Phrase not found!".to_string();
+            self.requested_scroll_id = None;
+            self.update_visible_rows();
+            return;
         }
+
+        let last = self.search_results.len() - 1;
+        let index = if advance < 0 || completion.reverse {
+            last
+        } else if advance > 0 {
+            (last).min(1)
+        } else {
+            0
+        };
+        self.select_match(index);
         self.update_visible_rows();
     }
 
@@ -919,15 +1178,16 @@ impl DocumentModel {
             return;
         }
         if query != self.last_executed_query || self.search_results.is_empty() {
-            self.search_start(settings);
+            if self.search_in_flight {
+                // Remember the intent so the finished search advances once.
+                self.pending_search_advance = 1;
+                return;
+            }
+            self.search_start(settings, false);
             return;
         }
-        self.current_search_index = (self.current_search_index + 1) % self.search_results.len();
-        let target = self.search_results[self.current_search_index].clone();
-        self.selected_path = Some(target.clone());
-        self.ensure_visible(&target);
-        self.requested_scroll_path = Some(target);
-        self.search_status = format!("{} of {} matches", self.current_search_index + 1, self.search_results.len());
+        let next = (self.current_search_index + 1) % self.search_results.len();
+        self.select_match(next);
         self.update_visible_rows();
     }
 
@@ -937,31 +1197,19 @@ impl DocumentModel {
             return;
         }
         if query != self.last_executed_query || self.search_results.is_empty() {
-            self.search_start(settings);
-            if !self.search_results.is_empty() {
-                self.current_search_index = self.search_results.len() - 1;
-                let target = self.search_results[self.current_search_index].clone();
-                self.selected_path = Some(target.clone());
-                self.ensure_visible(&target);
-                self.requested_scroll_path = Some(target);
-                self.search_status = format!("{} of {} matches", self.current_search_index + 1, self.search_results.len());
-                self.update_visible_rows();
+            if self.search_in_flight {
+                self.pending_search_advance = -1;
+                return;
             }
+            self.search_start(settings, true);
             return;
         }
-        if self.search_results.is_empty() {
-            return;
-        }
-        if self.current_search_index == 0 {
-            self.current_search_index = self.search_results.len() - 1;
+        let previous = if self.current_search_index == 0 {
+            self.search_results.len() - 1
         } else {
-            self.current_search_index -= 1;
-        }
-        let target = self.search_results[self.current_search_index].clone();
-        self.selected_path = Some(target.clone());
-        self.ensure_visible(&target);
-        self.requested_scroll_path = Some(target);
-        self.search_status = format!("{} of {} matches", self.current_search_index + 1, self.search_results.len());
+            self.current_search_index - 1
+        };
+        self.select_match(previous);
         self.update_visible_rows();
     }
 
@@ -1005,24 +1253,38 @@ impl DocumentModel {
     }
 }
 
-fn find_in<'a>(node: &'a Node, path: &str) -> Option<&'a Node> {
-    if node.path == path {
+fn find_by_id<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+    if node.id == id {
         return Some(node);
     }
     for child in &node.children {
-        if let Some(f) = find_in(child, path) {
+        if let Some(f) = find_by_id(child, id) {
             return Some(f);
         }
     }
     None
 }
 
-fn find_parent<'a>(node: &'a Node, path: &str) -> Option<&'a Node> {
+/// Iterative variant used when only existence matters.
+fn find_by_id_exists(node: &Node, id: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.id == id {
+            return true;
+        }
+        for c in &n.children {
+            stack.push(c);
+        }
+    }
+    false
+}
+
+fn find_parent<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
     for child in &node.children {
-        if child.path == path {
+        if child.id == id {
             return Some(node);
         }
-        if let Some(f) = find_parent(child, path) {
+        if let Some(f) = find_parent(child, id) {
             return Some(f);
         }
     }
@@ -1030,11 +1292,11 @@ fn find_parent<'a>(node: &'a Node, path: &str) -> Option<&'a Node> {
 }
 
 fn collect_ancestors(node: &Node, target: &str, stack: &mut Vec<String>) -> bool {
-    if node.path == target {
+    if node.id == target {
         return true;
     }
     for child in &node.children {
-        stack.push(node.path.clone());
+        stack.push(node.id.clone());
         if collect_ancestors(child, target, stack) {
             return true;
         }
@@ -1058,11 +1320,26 @@ fn has_huge_line(s: &str, limit: usize) -> bool {
     false
 }
 
-fn search_in(node: &Node, query: &str) -> Vec<String> {
+/// Collect matching node IDs in document order, stopping early when the
+/// background task is canceled.
+fn search_nodes(node: &Node, query: &str, cancel: &AtomicBool) -> Vec<String> {
     let q = query.to_lowercase();
     let q_ascii = q.is_ascii();
     let mut out = Vec::new();
-    search_recursive(node, &q, q_ascii, &mut out);
+    // One accumulator plus an explicit stack: descendant matches are appended
+    // once instead of being copied out of every recursion level.
+    let mut stack: Vec<&Node> = vec![node];
+    while let Some(n) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if node_matches_search(n, &q, q_ascii) {
+            out.push(n.id.clone());
+        }
+        for child in n.children.iter().rev() {
+            stack.push(child);
+        }
+    }
     out
 }
 
@@ -1119,14 +1396,3 @@ fn node_matches_search(node: &Node, q: &str, q_ascii: bool) -> bool {
     }
 }
 
-fn search_recursive(node: &Node, q: &str, q_ascii: bool, out: &mut Vec<String>) {
-    let mut stack: Vec<&Node> = vec![node];
-    while let Some(n) = stack.pop() {
-        if node_matches_search(n, q, q_ascii) {
-            out.push(n.path.clone());
-        }
-        for child in n.children.iter().rev() {
-            stack.push(child);
-        }
-    }
-}

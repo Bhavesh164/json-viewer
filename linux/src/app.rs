@@ -35,6 +35,12 @@ pub struct ViewerApp {
     pub focus_search: bool,
     pub initialized: bool,
     pub last_tab: AppTab,
+    /// Navigation requests already scrolled to, so each request scrolls once.
+    pub handled_navigation_request: usize,
+    /// Remaining frames a scroll request may wait for its rebuilt row.
+    pub pending_scroll_frames: u8,
+    /// Scroll-to-root requests already applied.
+    pub handled_scroll_to_top_request: usize,
 }
 
 impl ViewerApp {
@@ -73,6 +79,9 @@ impl ViewerApp {
             focus_search: false,
             initialized: false,
             last_tab: initial_tab,
+            handled_navigation_request: 0,
+            pending_scroll_frames: 0,
+            handled_scroll_to_top_request: 0,
         }
     }
 
@@ -108,7 +117,7 @@ impl ViewerApp {
 
     pub fn do_search_go(&mut self) {
         self.doc.search_query = self.search_input.clone();
-        self.doc.search_start(&self.settings);
+        self.doc.search_start(&self.settings, false);
     }
 
     pub fn do_search_next(&mut self) {
@@ -464,8 +473,23 @@ impl ViewerApp {
 
             ui.separator();
 
+            // Split mode keeps the last successfully parsed tree while the
+            // editor holds invalid JSON — flag it so copied values aren't assumed fresh.
+            if self.doc.active_tab == AppTab::Split && self.doc.is_dirty && self.doc.root.is_some() {
+                ui.label(
+                    egui::RichText::new("⚠ Out of date")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(235, 150, 60)),
+                )
+                .on_hover_text(
+                    "This tree shows the last valid JSON. It updates when the editor contains valid JSON.",
+                );
+                ui.separator();
+            }
+
             // Current selected path (macOS parity)
-            if let Some(path) = &self.doc.selected_path {
+            if let Some(path) = self.doc.selected_path() {
                 ui.label(
                     egui::RichText::new(path)
                         .monospace()
@@ -619,6 +643,15 @@ impl ViewerApp {
                 self.focus_search = false;
             }
 
+            // Emptying the query box clears the search, which also returns the
+            // tree viewport to its root.
+            if self.search_input.trim().is_empty()
+                && (!self.doc.search_results.is_empty() || self.doc.search_in_flight)
+            {
+                self.doc.search_query.clear();
+                self.doc.clear_search();
+            }
+
             // Fix search on Enter:
             // Singleline TextEdit loses focus when Enter is pressed in egui.
             // Check both lost_focus and has_focus, and retain focus so consecutive Enters cycle!
@@ -740,22 +773,59 @@ impl ViewerApp {
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
 
-        // When a search match or node navigation reveals a row, center it in the viewport once:
-        if let Some(target_path) = self.doc.requested_scroll_path.take() {
-            if let Some(idx) = self.doc.visible_tree_rows.iter().position(|r| r.path == target_path) {
-                let available_height = ui.available_height();
-                let viewport_h = if available_height.is_finite() && available_height > 60.0 {
-                    available_height
-                } else {
-                    400.0
-                };
-                let row_pitch = row_height + ui.spacing().item_spacing.y;
-                let target_y = idx as f32 * row_pitch;
-                let target_offset = (target_y - (viewport_h - row_height) * 0.5).max(0.0);
-                scroll_area = scroll_area
-                    .vertical_scroll_offset(target_offset)
-                    .horizontal_scroll_offset(0.0);
+        // A search match or node navigation expands the ancestors first and
+        // signals `tree_navigation_request`; only scroll once those rebuilt
+        // rows contain the target, otherwise keep the request for a later frame.
+        if self.doc.tree_navigation_request != self.handled_navigation_request {
+            self.handled_navigation_request = self.doc.tree_navigation_request;
+            self.pending_scroll_frames = 4;
+        }
+        let mut scroll_to_offset: Option<f32> = None;
+        if self.pending_scroll_frames > 0 {
+            if let Some(target_id) = self.doc.requested_scroll_id.clone() {
+                if let Some(idx) = self.doc.visible_tree_rows.iter().position(|r| r.id == target_id) {
+                    let available_height = ui.available_height();
+                    let viewport_h = if available_height.is_finite() && available_height > 60.0 {
+                        available_height
+                    } else {
+                        400.0
+                    };
+                    let row_pitch = row_height + ui.spacing().item_spacing.y;
+                    let target_y = idx as f32 * row_pitch;
+                    scroll_to_offset =
+                        Some((target_y - (viewport_h - row_height) * 0.5).max(0.0));
+                }
             }
+            if scroll_to_offset.is_some() || self.doc.requested_scroll_id.is_none() {
+                self.doc.requested_scroll_id = None;
+                self.pending_scroll_frames = 0;
+            } else {
+                // Row is not materialized yet: retry next frame, then give up.
+                self.pending_scroll_frames -= 1;
+                if self.pending_scroll_frames == 0 {
+                    self.doc.requested_scroll_id = None;
+                }
+                ctx.request_repaint();
+            }
+        }
+        if let Some(offset) = scroll_to_offset {
+            scroll_area = scroll_area
+                .vertical_scroll_offset(offset)
+                .horizontal_scroll_offset(0.0);
+            ctx.request_repaint();
+        }
+
+        // Clearing search returns the viewport to the root. Navigation scrolls
+        // take precedence, so an unhandled node jump is not fought over.
+        let scrolled_for_navigation = scroll_to_offset.is_some();
+        if !scrolled_for_navigation
+            && self.pending_scroll_frames == 0
+            && self.doc.requested_scroll_id.is_none()
+            && self.doc.tree_scroll_to_top_request != self.handled_scroll_to_top_request
+        {
+            self.handled_scroll_to_top_request = self.doc.tree_scroll_to_top_request;
+            scroll_area = scroll_area.vertical_scroll_offset(0.0).horizontal_scroll_offset(0.0);
+            ctx.request_repaint();
         }
 
         // Always virtualize rows so even 100,000+ line documents remain 60fps and never crash/OOM
@@ -765,7 +835,7 @@ impl ViewerApp {
                     render_tree_row(
                         ui,
                         &row,
-                        self.doc.selected_path.as_deref(),
+                        self.doc.selected_id.as_deref(),
                         self.settings.font_size as f32,
                         &mut toggle_path,
                         &mut toggle_leaf_path,
@@ -786,7 +856,7 @@ impl ViewerApp {
             self.doc.toggle_expand_leaf(&p);
         }
         if let Some(p) = select_path {
-            self.doc.selected_path = Some(p);
+            self.doc.selected_id = Some(p);
         }
         if let Some(p) = expand_subtree_path {
             self.doc.expand_subtree(&p);
@@ -808,25 +878,27 @@ impl ViewerApp {
             ui.strong(egui::RichText::new("Properties").size(12.0));
 
             // Selected node key
-            if let Some(sel) = &self.doc.selected_path {
-                let name = sel.rsplit('.').next().unwrap_or(sel.as_str());
-                ui.label(
-                    egui::RichText::new(if name == "$" { "JSON (Root)" } else { name })
-                        .monospace()
-                        .size(11.0),
-                );
+            if let Some(sel) = self.doc.selected_node() {
+                let name = if sel.path == "$" {
+                    "JSON (Root)".to_string()
+                } else if sel.is_container() {
+                    sel.key.clone()
+                } else {
+                    sel.path.rsplit('.').next().unwrap_or(sel.path.as_str()).to_string()
+                };
+                ui.label(egui::RichText::new(name).monospace().size(11.0));
             }
 
             // Jump back to parent button (macOS parity)
-            if let Some((parent_path, parent_key)) = parent_info {
-                let label = if parent_key == "JSON" || parent_path == "$" {
+            if let Some(parent) = parent_info {
+                let label = if parent.key == "JSON" || parent.path == "$" {
                     "← Root"
                 } else {
                     "← Parent"
                 };
                 if ui
                     .button(egui::RichText::new(label).size(10.0))
-                    .on_hover_text(format!("Jump back to {}", parent_path))
+                    .on_hover_text(format!("Jump back to {}", parent.path))
                     .clicked()
                 {
                     self.doc.navigate_to_parent();
@@ -917,13 +989,13 @@ impl ViewerApp {
                                 egui::RichText::new(&row.name).monospace().strong(),
                             );
                             if name_btn.clicked() {
-                                jump_target = Some(row.path.clone());
+                                jump_target = Some(row.id.clone());
                             }
                             name_btn = name_btn.on_hover_text(format!("Click to jump to {} in Tree", row.path));
 
                             name_btn.context_menu(|ui| {
                                 if ui.button("Go to Element in Tree").clicked() {
-                                    jump_target = Some(row.path.clone());
+                                    jump_target = Some(row.id.clone());
                                     ui.close();
                                 }
                                 ui.separator();
@@ -1164,7 +1236,7 @@ impl ViewerApp {
 fn render_tree_row(
     ui: &mut egui::Ui,
     row: &FlatTreeRow,
-    selected_path: Option<&str>,
+    selected_id: Option<&str>,
     font_size: f32,
     toggle_path: &mut Option<String>,
     toggle_leaf_path: &mut Option<String>,
@@ -1173,7 +1245,7 @@ fn render_tree_row(
     expand_subtree_path: &mut Option<String>,
     collapse_subtree_path: &mut Option<String>,
 ) {
-    let is_selected = selected_path == Some(row.path.as_str());
+    let is_selected = selected_id == Some(row.id.as_str());
 
     ui.horizontal(|ui| {
         // Indentation
@@ -1188,7 +1260,7 @@ fn render_tree_row(
                 .button(egui::RichText::new(symbol).monospace().size(font_size).strong())
                 .on_hover_text(if row.is_expanded { "Collapse" } else { "Expand" });
             if toggle_btn.clicked() {
-                *toggle_path = Some(row.path.clone());
+                *toggle_path = Some(row.id.clone());
             }
         } else if row.full_str.is_some() && row.char_count > 45 {
             // Big text toggle
@@ -1202,7 +1274,7 @@ fn render_tree_row(
                 )
                 .on_hover_text(if row.is_leaf_expanded { "Collapse text" } else { "Expand text" });
             if toggle_btn.clicked() {
-                *toggle_leaf_path = Some(row.path.clone());
+                *toggle_leaf_path = Some(row.id.clone());
             }
         } else {
             ui.add_space(20.0);
@@ -1260,17 +1332,18 @@ fn render_tree_row(
         }
 
         if row_resp.clicked() {
-            *select_path = Some(row.path.clone());
+            *select_path = Some(row.id.clone());
         }
         if row_resp.double_clicked() {
             if row.is_container {
-                *toggle_path = Some(row.path.clone());
+                *toggle_path = Some(row.id.clone());
             } else if row.full_str.is_some() && row.char_count > 45 {
-                *toggle_leaf_path = Some(row.path.clone());
+                *toggle_leaf_path = Some(row.id.clone());
             }
         }
 
         // Context menu
+        let id = row.id.clone();
         let path = row.path.clone();
         let key = row.key.clone();
         let value_repr = row.value_repr.clone();
@@ -1279,11 +1352,11 @@ fn render_tree_row(
         row_resp.context_menu(|ui| {
             if row.is_container {
                 if ui.button("Expand All Sub-levels").clicked() {
-                    *expand_subtree_path = Some(path.clone());
+                    *expand_subtree_path = Some(id.clone());
                     ui.close();
                 }
                 if ui.button("Collapse All Sub-levels").clicked() {
-                    *collapse_subtree_path = Some(path.clone());
+                    *collapse_subtree_path = Some(id.clone());
                     ui.close();
                 }
                 ui.separator();
@@ -1336,7 +1409,7 @@ fn render_tree_row(
                                 *copy_payload = Some(("Value".into(), s.clone()));
                             }
                             if ui.small_button("Collapse").clicked() {
-                                *toggle_leaf_path = Some(row.path.clone());
+                                *toggle_leaf_path = Some(row.id.clone());
                             }
                         });
                         ui.add(
@@ -1529,6 +1602,9 @@ impl eframe::App for ViewerApp {
                 });
             });
 
+        // Background searches deliver results between frames.
+        self.doc.poll_search_results();
+
         // Tab synchronization
         if self.last_tab != self.doc.active_tab {
             match self.doc.active_tab {
@@ -1537,6 +1613,11 @@ impl eframe::App for ViewerApp {
                 AppTab::Viewer => {
                     let s = self.settings.clone();
                     self.doc.parse_and_build_tree(true, &s);
+                    // A match can stay selected while the tree is hidden; put
+                    // it back in view instead of showing clipped root rows.
+                    if !self.doc.search_results.is_empty() {
+                        self.doc.request_scroll_to_selection();
+                    }
                 }
             }
             self.last_tab = self.doc.active_tab;
@@ -1674,7 +1755,10 @@ impl eframe::App for ViewerApp {
         self.show_shortcuts_window(ctx);
         self.show_about_window(ctx);
 
-        if self.pending_reparse {
+        if self.doc.search_in_flight {
+            // Keep frames coming until the background search reports back.
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        } else if self.pending_reparse {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         } else if self.toast.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));

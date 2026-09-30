@@ -6,6 +6,24 @@ use jsonviewer::python::parse_python_literal;
 use jsonviewer::settings::Settings;
 use jsonviewer::setup_fonts;
 
+/// Wait for the cancellable background search to deliver its results.
+fn settle_search(m: &mut DocumentModel) {
+    for _ in 0..4000 {
+        m.poll_search_results();
+        if !m.search_in_flight {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("background search did not finish");
+}
+
+fn run_search(m: &mut DocumentModel, s: &Settings, query: &str) {
+    m.search_query = query.to_string();
+    m.search_start(s, false);
+    settle_search(m);
+}
+
 #[test]
 fn parses_sample_and_formats() {
     let v = JSONParser::parse(r#"{"b":2,"a":1}"#).unwrap();
@@ -26,8 +44,7 @@ fn document_search_and_transforms() {
     let mut m = DocumentModel::new(&s);
     m.raw_text = r#"{"users":[{"name":"ann"},{"name":"bob"}]}"#.to_string();
     assert!(m.parse_and_build_tree(true, &s));
-    m.search_query = "bob".to_string();
-    m.search_start(&s);
+    run_search(&mut m, &s, "bob");
     assert_eq!(m.search_results.len(), 1);
     assert!(m.beautify(&s).is_ok());
     assert!(m.raw_text.contains('\n'));
@@ -75,16 +92,16 @@ fn property_grid_and_parent_drilldown() {
     assert!(m.parse_and_build_tree(true, &s));
 
     // Select nested object
-    m.selected_path = Some("$.profile".to_string());
+    m.selected_id = Some("$.profile".to_string());
     let (parent, props) = m.properties_for_selected();
-    assert_eq!(parent.unwrap().0, "$");
+    assert_eq!(parent.unwrap().id, "$");
     assert_eq!(props.len(), 2);
     assert_eq!(props[0].name, "name");
     assert_eq!(props[1].name, "age");
 
     // Navigate to parent
     m.navigate_to_parent();
-    assert_eq!(m.selected_path.as_deref(), Some("$"));
+    assert_eq!(m.selected_id.as_deref(), Some("$"));
 }
 
 #[test]
@@ -157,12 +174,13 @@ fn egui_frame_simulations_all_tabs() {
     // Test search
     app.search_input = "macOS".to_string();
     app.do_search_go();
+    settle_search(&mut app.doc);
     app.do_search_next();
     app.do_search_prev();
 
     // Test leaf expansion
     if let Some(first_leaf) = app.doc.visible_tree_rows.iter().find(|r| !r.is_container).cloned() {
-        app.doc.toggle_expand_leaf(&first_leaf.path);
+        app.doc.toggle_expand_leaf(&first_leaf.id);
     }
 
     // Run frame with expanded leaf
@@ -187,6 +205,7 @@ fn large_5mb_file_parsing_search_and_virtualization() {
     // Test search on large document
     app.search_input = "anes".to_string();
     app.do_search_go();
+    settle_search(&mut app.doc);
     assert!(!app.doc.search_results.is_empty());
     app.do_search_next();
     app.do_search_prev();
@@ -213,8 +232,7 @@ fn search_with_collapsed_nodes_expands_containers() {
     assert!(!m.visible_tree_rows.iter().any(|r| r.path == "$.statistics.downloads"));
 
     // Search for "downloads", which is inside collapsed $.statistics
-    m.search_query = "downloads".to_string();
-    m.search_start(&s);
+    run_search(&mut m, &s, "downloads");
 
     assert_eq!(m.search_results.len(), 1);
     assert_eq!(m.search_results[0], "$.statistics.downloads");
@@ -222,7 +240,7 @@ fn search_with_collapsed_nodes_expands_containers() {
     assert!(m.expanded_nodes.contains("$.statistics"));
     // "downloads" row must now be present in visible rows!
     assert!(m.visible_tree_rows.iter().any(|r| r.path == "$.statistics.downloads"));
-    assert_eq!(m.requested_scroll_path.as_deref(), Some("$.statistics.downloads"));
+    assert_eq!(m.requested_scroll_id.as_deref(), Some("$.statistics.downloads"));
 }
 
 #[test]
@@ -238,8 +256,7 @@ fn search_container_node_itself_expands() {
     assert!(!m.visible_tree_rows.iter().any(|r| r.path == "$.author.name"));
 
     // Search for "author", which is a container node itself
-    m.search_query = "author".to_string();
-    m.search_start(&s);
+    run_search(&mut m, &s, "author");
 
     assert!(!m.search_results.is_empty());
     // $.author itself must now be expanded!
@@ -262,12 +279,11 @@ fn search_when_root_itself_collapsed_expands() {
     assert_eq!(m.visible_tree_rows.len(), 1); // Only root row itself
 
     // Search for "rating"
-    m.search_query = "rating".to_string();
-    m.search_start(&s);
+    run_search(&mut m, &s, "rating");
 
     assert!(m.expanded_nodes.contains("$"));
     assert!(m.visible_tree_rows.iter().any(|r| r.path == "$.rating"));
-    assert_eq!(m.requested_scroll_path.as_deref(), Some("$.rating"));
+    assert_eq!(m.requested_scroll_id.as_deref(), Some("$.rating"));
 }
 
 #[test]
@@ -281,8 +297,10 @@ fn scrolling_request_consumed_in_egui_frame() {
 
     app.search_input = "downloads".to_string();
     app.do_search_go();
+    settle_search(&mut app.doc);
 
-    assert_eq!(app.doc.requested_scroll_path.as_deref(), Some("$.statistics.downloads"));
+    assert_eq!(app.doc.requested_scroll_id.as_deref(), Some("$.statistics.downloads"));
+    let navigation_request = app.doc.tree_navigation_request;
 
     // Frame 1: tree view renders and consumes the scroll request to center the row
     let _ = ctx.run(Default::default(), |ctx| {
@@ -292,16 +310,18 @@ fn scrolling_request_consumed_in_egui_frame() {
     });
 
     // The scroll request must have been consumed
-    assert!(app.doc.requested_scroll_path.is_none());
+    assert!(app.doc.requested_scroll_id.is_none());
+    assert_eq!(app.handled_navigation_request, navigation_request);
 
-    // Frame 2: subsequent frames leave requested_scroll_path as None so user scrolling is never locked
+    // Frame 2: subsequent frames leave requested_scroll_id as None so user scrolling is never locked
     let _ = ctx.run(Default::default(), |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
             app.show_tree_view(ctx, ui);
         });
     });
 
-    assert!(app.doc.requested_scroll_path.is_none());
+    assert!(app.doc.requested_scroll_id.is_none());
+    assert!(app.pending_scroll_frames == 0);
 }
 
 #[test]
@@ -314,23 +334,22 @@ fn search_next_previous_cycling_expands_and_scrolls() {
     m.collapse_all();
     // Search query "local" matches $.author.email
     // Search query "1" matches multiple places across collapsed containers
-    m.search_query = "8".to_string();
-    m.search_start(&s);
+    run_search(&mut m, &s, "8");
     assert!(m.search_results.len() >= 2);
 
     let first_target = m.search_results[0].clone();
-    assert_eq!(m.requested_scroll_path.as_deref(), Some(first_target.as_str()));
+    assert_eq!(m.requested_scroll_id.as_deref(), Some(first_target.as_str()));
     assert!(m.visible_tree_rows.iter().any(|r| r.path == first_target));
 
     // Next match
     m.search_next(&s);
     let second_target = m.search_results[1].clone();
-    assert_eq!(m.requested_scroll_path.as_deref(), Some(second_target.as_str()));
+    assert_eq!(m.requested_scroll_id.as_deref(), Some(second_target.as_str()));
     assert!(m.visible_tree_rows.iter().any(|r| r.path == second_target));
 
     // Previous match returns to first
     m.search_previous(&s);
-    assert_eq!(m.requested_scroll_path.as_deref(), Some(first_target.as_str()));
+    assert_eq!(m.requested_scroll_id.as_deref(), Some(first_target.as_str()));
     assert!(m.visible_tree_rows.iter().any(|r| r.path == first_target));
 }
 
@@ -437,3 +456,307 @@ fn settings_deserializes_legacy_config_without_natural_scrolling() {
 }
 
 
+
+fn build_large_doc(items: usize) -> String {
+    let mut doc = String::from("{\"needle\":\"early match\",\"items\":[");
+    for i in 0..items {
+        if i > 0 {
+            doc.push(',');
+        }
+        doc.push_str(&format!("{{\"id\":{},\"group\":{{\"value\":{}}}}}", i, i));
+    }
+    doc.push_str("]}");
+    doc
+}
+
+#[test]
+fn repeated_object_keys_get_unique_tree_ids() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = r#"{"count":3,"count":23423,"count":23423}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+
+    let root = m.root.as_ref().unwrap();
+    assert_eq!(root.children.len(), 3, "Parser keeps every repeated key");
+    let ids: std::collections::HashSet<&str> = root.children.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids.len(), 3, "Repeated object keys need unique tree node IDs");
+    let values: Vec<String> = root.children.iter().map(|c| c.value_string()).collect();
+    assert_eq!(values, vec!["3".to_string(), "23423".to_string(), "23423".to_string()]);
+
+    m.expand_all();
+    let row_ids: Vec<String> = m
+        .visible_tree_rows
+        .iter()
+        .filter(|r| r.key == "count")
+        .map(|r| r.id.clone())
+        .collect();
+    assert_eq!(row_ids.len(), 3, "Every repeated entry must appear in the tree");
+    let unique: std::collections::HashSet<&String> = row_ids.iter().collect();
+    assert_eq!(unique.len(), 3);
+    // Rows still share the JSON path shown to the user.
+    for row in m.visible_tree_rows.iter().filter(|r| r.key == "count") {
+        assert_eq!(row.path, "$.count");
+    }
+
+    // Repeated entries can be selected independently.
+    m.selected_id = Some(row_ids[1].clone());
+    let (_, props) = m.properties_for_selected();
+    assert_eq!(props.len(), 3);
+    assert_eq!(props[1].value, "23423");
+    assert_eq!(props[1].path, "$.count");
+    let prop_ids: std::collections::HashSet<String> = props.into_iter().map(|p| p.id).collect();
+    assert_eq!(prop_ids.len(), 3, "Property rows keep distinct IDs for jumping");
+
+    // Expanding one repeated container must not expand its sibling.
+    m.raw_text = r#"{"a":{"v":1},"a":{"v":2}}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+    m.toggle_expand("$.a");
+    assert_eq!(m.visible_tree_rows.len(), 4, "Only the selected duplicate shows its child");
+    m.toggle_expand("$.a#2");
+    assert_eq!(m.visible_tree_rows.len(), 5);
+}
+
+#[test]
+fn split_editing_keeps_last_valid_tree_and_preserves_navigation() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = r#"{"user":{"name":"ann"},"keep":{"deep":{"value":1}}}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+
+    m.expand_subtree("$.keep.deep");
+    m.select_and_reveal("$.keep.deep.value");
+    assert_eq!(m.selected_id.as_deref(), Some("$.keep.deep.value"));
+    let rows_before = m.visible_tree_rows.len();
+
+    // Editor text becomes invalid: the last parsed tree stays and is flagged out of date.
+    m.raw_text = "{ \"user\": ".to_string();
+    m.mark_edited();
+    assert!(!m.parse_and_build_tree(true, &s));
+    assert!(m.is_dirty, "Tree stays out of date while the text is invalid");
+    assert!(m.parse_error.is_some());
+    assert!(m.root.is_some(), "Last successfully parsed tree is kept");
+    assert_eq!(m.visible_tree_rows.len(), rows_before);
+    assert_eq!(m.selected_id.as_deref(), Some("$.keep.deep.value"));
+
+    // A successful parse keeps the selection and the expanded branches.
+    m.raw_text = r#"{"user":{"name":"bob"},"keep":{"deep":{"value":2},"extra":3}}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+    assert!(!m.is_dirty);
+    assert!(m.parse_error.is_none());
+    assert_eq!(m.selected_id.as_deref(), Some("$.keep.deep.value"));
+    assert!(m.expanded_nodes.contains("$.keep"));
+    assert!(m.expanded_nodes.contains("$.keep.deep"));
+
+    // Missing branches collapse and a vanished selection falls back to the root.
+    m.raw_text = r#"{"other":1}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+    assert_eq!(m.selected_id.as_deref(), Some("$"));
+    assert!(!m.expanded_nodes.contains("$.keep"));
+    assert!(m.expanded_nodes.contains("$"));
+}
+
+#[test]
+fn tree_navigation_expands_ancestors_before_requesting_scroll() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = jsonviewer::model::SAMPLE_JSON.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+
+    m.collapse_all();
+    m.toggle_expand("$"); // collapse the root as well
+    assert_eq!(m.visible_tree_rows.len(), 1);
+
+    let before = m.tree_navigation_request;
+    run_search(&mut m, &s, "downloads");
+
+    assert!(m.tree_navigation_request > before, "Navigation request is signalled after the rebuild");
+    let target = m.requested_scroll_id.clone().expect("scroll requested");
+    assert!(
+        m.visible_tree_rows.iter().any(|r| r.id == target),
+        "Ancestors are expanded before the scroll is requested"
+    );
+}
+
+#[test]
+fn scroll_request_survives_until_the_row_exists() {
+    let ctx = egui::Context::default();
+    let s = Settings::default();
+    let mut app = ViewerApp::new(s, None);
+
+    app.doc.tree_navigation_request += 1;
+    app.doc.requested_scroll_id = Some("$.not.a.real.node".to_string());
+
+    // Frame 1: the row is missing, so the request must stay pending.
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.show_tree_view(ctx, ui);
+        });
+    });
+    assert_eq!(app.doc.requested_scroll_id.as_deref(), Some("$.not.a.real.node"));
+    assert!(app.pending_scroll_frames > 0);
+
+    // Give up after a bounded number of frames so user scrolling is never locked.
+    for _ in 0..4 {
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.show_tree_view(ctx, ui);
+            });
+        });
+    }
+    assert!(app.doc.requested_scroll_id.is_none());
+    assert_eq!(app.pending_scroll_frames, 0);
+}
+
+#[test]
+fn search_from_bottom_of_large_tree_scrolls_to_early_match() {
+    let s = Settings::default();
+    let mut app = ViewerApp::new(s.clone(), None);
+    app.doc.raw_text = build_large_doc(400);
+    assert!(app.doc.parse_and_build_tree(true, &s));
+    app.doc.expand_all();
+    assert!(app.doc.visible_tree_rows.len() > 800, "Tree is far taller than the viewport");
+
+    app.search_input = "needle".to_string();
+    app.do_search_go();
+    settle_search(&mut app.doc);
+
+    let target = app.doc.requested_scroll_id.clone().expect("scroll requested");
+    let idx = app
+        .doc
+        .visible_tree_rows
+        .iter()
+        .position(|r| r.id == target)
+        .expect("match row is part of the rebuilt tree");
+    assert!(idx < 3, "Match near the beginning of the document stays near the top");
+
+    let ctx = egui::Context::default();
+    let request = app.doc.tree_navigation_request;
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.show_tree_view(ctx, ui);
+        });
+    });
+    assert!(app.doc.requested_scroll_id.is_none(), "Scroll request is consumed");
+    assert_eq!(app.handled_navigation_request, request);
+}
+
+#[test]
+fn search_runs_in_background_and_reports_progress() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = build_large_doc(2000);
+    assert!(m.parse_and_build_tree(true, &s));
+
+    m.search_query = "value".to_string();
+    m.search_start(&s, false);
+    // The query runs off the UI thread: results are not applied synchronously.
+    assert!(m.search_in_flight || m.search_status == "Searching…".to_string());
+    assert!(m.search_results.is_empty(), "Old matches must not linger while searching");
+
+    settle_search(&mut m);
+    assert!(!m.search_in_flight);
+    assert!(!m.search_results.is_empty());
+    assert!(m.search_status.contains("of "), "Match count is shown: {}", m.search_status);
+    assert!(m.selected_id.is_some(), "First match is revealed");
+}
+
+#[test]
+fn editing_the_query_discards_in_flight_results() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = build_large_doc(2000);
+    assert!(m.parse_and_build_tree(true, &s));
+
+    m.search_query = "value".to_string();
+    m.search_start(&s, false);
+    // Clearing the search cancels the worker and invalidates its result.
+    m.clear_search();
+    assert!(!m.search_in_flight);
+    assert!(m.search_results.is_empty());
+    assert!(m.search_status.is_empty());
+
+    for _ in 0..20 {
+        m.poll_search_results();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(m.search_results.is_empty(), "Canceled query must not deliver matches");
+    assert!(m.selected_id.is_none() || m.search_results.is_empty());
+
+    // A newer query still works afterwards.
+    run_search(&mut m, &s, "group");
+    assert!(!m.search_results.is_empty());
+}
+
+#[test]
+fn search_previous_while_running_lands_on_last_match() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = build_large_doc(500);
+    assert!(m.parse_and_build_tree(true, &s));
+
+    m.search_query = "value".to_string();
+    m.search_start(&s, false);
+    m.search_previous(&s); // pressed before results landed
+    settle_search(&mut m);
+
+    assert_eq!(m.selected_id.as_deref(), m.search_results.last().map(|s| s.as_str()));
+    assert!(m.search_status.starts_with(&format!("{} of ", m.search_results.len())));
+}
+
+#[test]
+fn clearing_search_requests_tree_scroll_to_root() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = jsonviewer::model::SAMPLE_JSON.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+    run_search(&mut m, &s, "downloads");
+    assert!(!m.search_results.is_empty());
+
+    let before = m.tree_scroll_to_top_request;
+    m.clear_search();
+    assert!(m.tree_scroll_to_top_request > before, "Clearing search asks the tree to return to the root");
+    assert!(m.search_results.is_empty());
+    assert!(m.requested_scroll_id.is_none());
+
+    // The view applies the request once.
+    let ctx = egui::Context::default();
+    let mut app = ViewerApp::new(s, None);
+    app.doc = m;
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.show_tree_view(ctx, ui);
+        });
+    });
+    assert_eq!(app.handled_scroll_to_top_request, app.doc.tree_scroll_to_top_request);
+}
+
+#[test]
+fn returning_to_viewer_restores_scroll_for_selected_match() {
+    let s = Settings::default();
+    let mut app = ViewerApp::new(s.clone(), None);
+    app.doc.raw_text = build_large_doc(400);
+    assert!(app.doc.parse_and_build_tree(true, &s));
+    app.doc.expand_all();
+
+    app.search_input = "needle".to_string();
+    app.do_search_go();
+    settle_search(&mut app.doc);
+    let selected = app.doc.selected_id.clone().expect("match selected");
+    app.doc.requested_scroll_id = None;
+
+    // Switching to the Text tab and back must re-request the scroll even though
+    // the selection never changed.
+    let mut app = app;
+    app.doc.active_tab = AppTab::Text;
+    app.last_tab = AppTab::Text;
+    app.doc.active_tab = AppTab::Viewer;
+    // Mirror the tab synchronization the frame loop performs.
+    let settings = app.settings.clone();
+    app.doc.parse_and_build_tree(true, &settings);
+    if !app.doc.search_results.is_empty() {
+        app.doc.request_scroll_to_selection();
+    }
+    assert_eq!(app.doc.selected_id.as_deref(), Some(selected.as_str()));
+    assert_eq!(app.doc.requested_scroll_id.as_deref(), Some(selected.as_str()));
+    assert!(app.doc.visible_tree_rows.iter().any(|r| r.id == selected));
+}

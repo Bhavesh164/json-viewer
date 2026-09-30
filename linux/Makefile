@@ -16,8 +16,10 @@ package: release
 	@cp resources/AppIcon.png target/release/staging/
 	@cp target/release/jsonviewer target/release/jsonviewer-linux-x86_64
 	@tar -czf target/release/jsonviewer-linux-x86_64.tar.gz -C target/release/staging .
+	@(cd target/release/staging && zip -q -r ../jsonviewer-linux-x86_64.zip .) || echo "warning: 'zip' not found, skipped jsonviewer-linux-x86_64.zip"
 	@rm -rf target/release/staging
 	@echo "Release archive created: target/release/jsonviewer-linux-x86_64.tar.gz"
+	@echo "Release zip created: target/release/jsonviewer-linux-x86_64.zip"
 	@echo "Standalone binary created: target/release/jsonviewer-linux-x86_64"
 
 test:
