@@ -148,6 +148,18 @@ do {
     assertTest(false, "Failed to test tree building: \(error)")
 }
 
+// Duplicate object keys are preserved by the parser and need distinct tree IDs.
+do {
+    let val = try JSONParser.parse("{\"count\":3,\"count\":23423,\"count\":23423}")
+    let root = JSONNode.buildTree(from: val, rootKey: "JSON")
+    let countNodes = root.children ?? []
+    assertTest(countNodes.count == 3, "Tree contains every repeated object key")
+    assertTest(Set(countNodes.map(\.id)).count == 3, "Repeated object keys have unique tree IDs")
+    assertTest(countNodes.map(\.valueString) == ["3", "23423", "23423"], "Repeated object key values remain in source order")
+} catch {
+    assertTest(false, "Failed to test duplicate object keys: \(error)")
+}
+
 // 6. Test Property Grid Mapping
 do {
     let json = """

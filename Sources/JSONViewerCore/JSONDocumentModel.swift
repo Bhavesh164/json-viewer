@@ -209,6 +209,7 @@ public final class JSONDocumentModel: ObservableObject {
         do {
             // Tree node IDs are JSON paths, so they remain stable across rebuilds.
             // Keep the current navigation state and restore the parts that still exist.
+            let previousSelectionID = selectedNode?.id
             let previousSelectionPath = selectedNode?.path
             let previousExpandedIds = expandedNodeIds
             let previousExpandedLeafIds = expandedLeafNodeIds
@@ -260,11 +261,15 @@ public final class JSONDocumentModel: ObservableObject {
             let root = JSONNode.buildTree(from: parsed, rootKey: "JSON")
             self.rootNode = root
 
+            var nodesByID: [String: JSONNode] = [:]
             var nodesByPath: [String: JSONNode] = [:]
             var containerIds = Set<String>()
             var leafIds = Set<String>()
             func indexNodes(_ node: JSONNode) {
-                nodesByPath[node.path] = node
+                nodesByID[node.id] = node
+                if nodesByPath[node.path] == nil {
+                    nodesByPath[node.path] = node
+                }
                 if node.isContainer {
                     containerIds.insert(node.id)
                 } else {
@@ -274,7 +279,9 @@ public final class JSONDocumentModel: ObservableObject {
             }
             indexNodes(root)
 
-            self.selectedNode = previousSelectionPath.flatMap { nodesByPath[$0] } ?? root
+            self.selectedNode = previousSelectionID.flatMap { nodesByID[$0] }
+                ?? previousSelectionPath.flatMap { nodesByPath[$0] }
+                ?? root
             self.expandedNodeIds = previousExpandedIds.intersection(containerIds)
             self.expandedNodeIds.insert(root.id)
             self.expandedLeafNodeIds = previousExpandedLeafIds.intersection(leafIds)

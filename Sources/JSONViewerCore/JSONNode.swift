@@ -232,32 +232,60 @@ public struct PropertyGridRow: Identifiable, Equatable, Sendable {
 // MARK: - Tree Builder
 extension JSONNode {
     public static func buildTree(from json: JSONValue, rootKey: String = "JSON") -> JSONNode {
-        let root = buildNode(key: rootKey, value: json, path: "$", parent: nil)
+        var usedIDs: Set<String> = []
+        let root = buildNode(key: rootKey, value: json, path: "$", id: "$", parent: nil, usedIDs: &usedIDs)
         return root
     }
-    
-    private static func buildNode(key: String, value: JSONValue, path: String, parent: JSONNode?) -> JSONNode {
+
+    private static func buildNode(
+        key: String,
+        value: JSONValue,
+        path: String,
+        id: String,
+        parent: JSONNode?,
+        usedIDs: inout Set<String>
+    ) -> JSONNode {
         switch value {
         case .object(let pairs):
-            let node = JSONNode(key: key, value: value, path: path, children: nil, parent: parent)
+            let node = JSONNode(id: id, key: key, value: value, path: path, children: nil, parent: parent)
             let builtChildren = pairs.map { pair in
                 let childPath = "\(path).\(pair.key)"
-                return buildNode(key: pair.key, value: pair.value, path: childPath, parent: node)
+                let candidateID = id == path ? childPath : "\(id).\(pair.key)"
+                let childID = uniqueID(from: candidateID, usedIDs: &usedIDs)
+                return buildNode(key: pair.key, value: pair.value, path: childPath, id: childID, parent: node, usedIDs: &usedIDs)
             }
             node.children = builtChildren
             return node
-            
+
         case .array(let items):
-            let node = JSONNode(key: key, value: value, path: path, children: nil, parent: parent)
+            let node = JSONNode(id: id, key: key, value: value, path: path, children: nil, parent: parent)
             let builtChildren = items.enumerated().map { idx, item in
                 let childPath = "\(path)[\(idx)]"
-                return buildNode(key: "\(idx)", value: item, path: childPath, parent: node)
+                let candidateID = id == path ? childPath : "\(id)[\(idx)]"
+                let childID = uniqueID(from: candidateID, usedIDs: &usedIDs)
+                return buildNode(key: "\(idx)", value: item, path: childPath, id: childID, parent: node, usedIDs: &usedIDs)
             }
             node.children = builtChildren
             return node
-            
+
         default:
-            return JSONNode(key: key, value: value, path: path, children: nil, parent: parent)
+            return JSONNode(id: id, key: key, value: value, path: path, parent: parent)
         }
+    }
+
+    private static func uniqueID(from candidate: String, usedIDs: inout Set<String>) -> String {
+        guard usedIDs.contains(candidate) else {
+            usedIDs.insert(candidate)
+            return candidate
+        }
+
+        var occurrence = 2
+        var uniqueCandidate = "\(candidate)#\(occurrence)"
+        while usedIDs.contains(uniqueCandidate) {
+            occurrence += 1
+            uniqueCandidate = "\(candidate)#\(occurrence)"
+        }
+        usedIDs.insert(uniqueCandidate)
+        return uniqueCandidate
     }
 }
