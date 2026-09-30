@@ -1,9 +1,17 @@
 # Windows follow-up
 
+## Search responsiveness
+
+- Run searches on a cancellable background task so clearing or editing the query stays responsive on large JSON documents.
+- Traverse nodes with a shared match accumulator to avoid repeatedly copying descendant results.
+- Show search-in-progress status and discard results from canceled or outdated queries.
+
 ## Search and Properties navigation
 
 - When Enter, Go, Next, Previous, or a Properties row selects a match, expand its ancestors before scrolling the tree to that node.
 - Trigger scrolling after the expanded rows have been rebuilt so virtualized tree rows can be found reliably.
+- When returning from Text to Viewer with a search match still selected, restore the tree scroll position even if the selected node did not change; do not leave earlier root rows clipped off-screen.
+- When clearing search, return the tree viewport to the root.
 - Verify with a match near the beginning of a large pasted JSON document while the tree is scrolled far down.
 
 ## Split mode tree while editing

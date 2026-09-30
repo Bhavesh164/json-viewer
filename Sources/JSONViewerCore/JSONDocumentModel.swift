@@ -23,6 +23,8 @@ public final class JSONDocumentModel: ObservableObject {
     @Published public private(set) var treeVersion: Int = 0
     /// Incremented after a node has been expanded and selected for tree navigation.
     @Published public private(set) var treeNavigationRequest: Int = 0
+    /// Incremented when clearing search should return the tree viewport to its root.
+    @Published public private(set) var treeScrollToTopRequest: Int = 0
     
     @Published public var activeTab: AppTab = .text {
         didSet {
@@ -74,12 +76,27 @@ public final class JSONDocumentModel: ObservableObject {
     // Search State
     @Published public var isSearchVisible: Bool = true
     @Published public var focusSearchFieldTrigger: Int = 0
-    @Published public var searchQuery: String = ""
+    @Published public var searchQuery: String = "" {
+        didSet {
+            guard searchQuery != oldValue else { return }
+            cancelSearchTask()
+            searchResults = []
+            searchResultIds = []
+            searchStatus = ""
+            lastExecutedSearchQuery = ""
+            currentSearchIndex = 0
+            if searchQuery.isEmpty {
+                treeScrollToTopRequest += 1
+            }
+        }
+    }
     @Published public var searchResults: [JSONNode] = []
     @Published public var searchResultIds: Set<String> = []
     @Published public var currentSearchIndex: Int = 0
     @Published public var searchStatus: String = ""
     @Published public var lastExecutedSearchQuery: String = ""
+    private var searchTask: Task<Void, Never>?
+    private var searchGeneration = 0
     
     public func focusSearch() {
         isSearchVisible = true
@@ -516,46 +533,71 @@ public final class JSONDocumentModel: ObservableObject {
     
     // MARK: - Search
     public func clearSearch() {
+        let queryWasAlreadyEmpty = searchQuery.isEmpty
+        cancelSearchTask()
         searchQuery = ""
         searchResults = []
         searchResultIds = []
         searchStatus = ""
         lastExecutedSearchQuery = ""
         currentSearchIndex = 0
+        if queryWasAlreadyEmpty {
+            treeScrollToTopRequest += 1
+        }
     }
-    
-    public func searchStart() {
+
+    private func cancelSearchTask() {
+        searchTask?.cancel()
+        searchTask = nil
+        searchGeneration += 1
+    }
+
+    public func searchStart(reverse: Bool = false) {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             clearSearch()
             return
         }
-        
+
+        cancelSearchTask()
+        let generation = searchGeneration
+
         lastExecutedSearchQuery = query
         
         guard let root = rootNode else {
             // Try building tree first
             if parseAndBuildTree(silent: true), let r = rootNode {
-                performSearch(on: r, query: query)
+                performSearch(on: r, query: query, generation: generation, reverse: reverse)
             } else {
                 searchStatus = "Phrase not found!"
             }
             return
         }
         
-        performSearch(on: root, query: query)
+        performSearch(on: root, query: query, generation: generation, reverse: reverse)
     }
-    
-    private func performSearch(on root: JSONNode, query: String) {
-        let matches = root.searchMatches(query: query)
+
+    private func performSearch(on root: JSONNode, query: String, generation: Int, reverse: Bool) {
+        searchStatus = "Searching…"
+        searchTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let matches = root.searchMatches(query: query)
+            guard !Task.isCancelled else { return }
+            await self?.finishSearch(matches, query: query, generation: generation, reverse: reverse)
+        }
+    }
+
+    private func finishSearch(_ matches: [JSONNode], query: String, generation: Int, reverse: Bool) {
+        guard generation == searchGeneration,
+              query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+        searchTask = nil
         self.searchResults = matches
         self.searchResultIds = Set(matches.map { $0.id })
-        
+
         if matches.isEmpty {
             self.searchStatus = "Phrase not found!"
         } else {
-            self.currentSearchIndex = 0
-            selectMatch(at: 0)
+            self.currentSearchIndex = reverse ? matches.count - 1 : 0
+            selectMatch(at: self.currentSearchIndex)
         }
     }
     
@@ -564,6 +606,7 @@ public final class JSONDocumentModel: ObservableObject {
         guard !query.isEmpty else { return }
         
         if query != lastExecutedSearchQuery || searchResults.isEmpty {
+            if searchTask != nil { return }
             searchStart()
             return
         }
@@ -578,11 +621,8 @@ public final class JSONDocumentModel: ObservableObject {
         guard !query.isEmpty else { return }
         
         if query != lastExecutedSearchQuery || searchResults.isEmpty {
-            searchStart()
-            if !searchResults.isEmpty {
-                currentSearchIndex = searchResults.count - 1
-                selectMatch(at: currentSearchIndex)
-            }
+            if searchTask != nil { return }
+            searchStart(reverse: true)
             return
         }
         

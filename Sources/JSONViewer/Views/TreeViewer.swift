@@ -117,8 +117,36 @@ public struct TreeViewer: View {
                         .onChange(of: model.treeNavigationRequest) { _ in
                             guard let selectedId = model.selectedNode?.id else { return }
                             let destination = "\(model.treeVersion):\(selectedId)"
+                            let request = model.treeNavigationRequest
+                            let topRequest = model.treeScrollToTopRequest
                             // Wait for SwiftUI to lay out the newly expanded lazy row.
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                guard request == model.treeNavigationRequest,
+                                      topRequest == model.treeScrollToTopRequest else { return }
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    proxy.scrollTo(destination, anchor: .center)
+                                }
+                            }
+                        }
+                        .onChange(of: model.treeScrollToTopRequest) { _ in
+                            guard let rootId = model.rootNode?.id else { return }
+                            let destination = "\(model.treeVersion):\(rootId)"
+                            let request = model.treeScrollToTopRequest
+                            let navigationRequest = model.treeNavigationRequest
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                guard request == model.treeScrollToTopRequest,
+                                      navigationRequest == model.treeNavigationRequest else { return }
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    proxy.scrollTo(destination, anchor: .top)
+                                }
+                            }
+                        }
+                        .onAppear {
+                            guard let selectedId = model.selectedNode?.id else { return }
+                            let destination = "\(model.treeVersion):\(selectedId)"
+                            let request = model.treeNavigationRequest
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                guard request == model.treeNavigationRequest else { return }
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     proxy.scrollTo(destination, anchor: .center)
                                 }

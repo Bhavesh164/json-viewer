@@ -168,17 +168,20 @@ public final class JSONNode: Identifiable, ObservableObject, @unchecked Sendable
     public func searchMatches(query: String) -> [JSONNode] {
         let lowerQuery = query.lowercased()
         var matches: [JSONNode] = []
-        
-        if displayText.lowercased().contains(lowerQuery) || path.lowercased().contains(lowerQuery) {
-            matches.append(self)
-        }
-        
-        if let children = children {
-            for child in children {
-                matches.append(contentsOf: child.searchMatches(query: query))
+
+        // Use one accumulator instead of recursively concatenating arrays, which
+        // copies all descendant matches repeatedly on large documents.
+        var pending: [JSONNode] = [self]
+        while let node = pending.popLast() {
+            if Task.isCancelled { break }
+            if node.displayText.lowercased().contains(lowerQuery) || node.path.lowercased().contains(lowerQuery) {
+                matches.append(node)
+            }
+            if let children = node.children {
+                pending.append(contentsOf: children.reversed())
             }
         }
-        
+
         return matches
     }
     
