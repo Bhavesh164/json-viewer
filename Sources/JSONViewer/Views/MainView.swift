@@ -22,16 +22,13 @@ public struct MainView: View {
     
     @ViewBuilder
     private var mainContent: some View {
-        HSplitView {
-            if model.activeTab != .viewer {
-                TextEditorView(model: model)
-                    .frame(minWidth: 360, maxWidth: .infinity)
-            }
-            if model.activeTab != .text {
-                viewerContentView
-                    .frame(minWidth: 320, maxWidth: .infinity)
-            }
-        }
+        AdaptiveSplitView(
+            activeTab: model.activeTab,
+            leftView: TextEditorView(model: model)
+                .frame(minWidth: 360, maxWidth: .infinity),
+            rightView: viewerContentView
+                .frame(minWidth: 320, maxWidth: .infinity)
+        )
     }
     
     @ToolbarContentBuilder

@@ -579,25 +579,32 @@ switches and improve the performance and don't introduce any more bugs."*
 
 ### What was implemented
 
-- **Request-guarded tree navigation:**
-  `TreeViewer` tracks `lastHandledNavigationRequest` and `lastHandledScrollToTopRequest`.
-  `onAppear` only scrolls if an unhandled navigation request was pending (e.g. from a search
-  performed while offscreen), and does so immediately without animation. Normal tab switches
-  (`treeNavigationRequest == 0`) do not scroll at all, opening immediately at the top.
+- **Permanent view mounting via `AdaptiveSplitView` (`NSSplitViewController`):**
+  Replaced SwiftUI conditional view destruction with `AdaptiveSplitView`, wrapping a native
+  `NSSplitViewController` with `leftItem` (editor) and `rightItem` (viewer). Switching tabs
+  toggles `isCollapsed` on AppKit split items rather than destroying and recreating SwiftUI
+  view trees. Neither `TextEditorView` nor `TreeViewer` is ever unmounted. This completely
+  eliminates:
+  1. The 1–2 second freeze from SwiftUI allocating and laying out tens of thousands of rows on tab switch.
+  2. The AppKit `NSScrollView` initial layout glitch where a freshly mounted scroll view with an unflipped coordinate system starts at the bottom origin and scrolls up.
+  3. All loss of scroll position and cursor location when switching between Text, Viewer, and Split.
+- **Elimination of synchronous parse on appear (`TreeViewer.onAppear`):**
+  Removed `model.parseAndBuildTree(silent: true)` on dirty documents from `TreeViewer.onAppear`.
+  Dirty documents are parsed asynchronously off the main thread via `rebuildTreeIfNeeded(silent: true)`.
+- **Precomputed `visibleRows` off the main thread:**
+  `JSONDocumentModel.parseDocument` runs on `Task.detached` and directly resolves `selectedNode`,
+  `expandedContainerIds`, `expandedLeafIds`, and traverses `root` to precompute `visibleRows: [FlatTreeRow]`.
+  `applyParse` on the MainActor applies precomputed collections in ~0.5 ms rather than running a 40,000+
+  node traversal on the UI thread.
+- **Scroll request synchronization on appear:**
+  `TreeViewer.onAppear` synchronizes its internal tracking counters (`lastHandledNavigationRequest = model.treeNavigationRequest`,
+  `lastHandledScrollToTopRequest = model.treeScrollToTopRequest`). It only scrolls when an explicit
+  navigation event (search match, property click, scroll to top) occurs via `.onChange`. Normal tab
+  switches do not scroll at all and preserve exact viewport positions.
 - **O(1) container row diffing:**
   `FlatTreeNodeRow.==` compares `lhs.row.node.typeBadgeText == rhs.row.node.typeBadgeText`
   for container nodes (which only render their key and item count badge), and only compares
   scalar values for leaf nodes. This eliminates recursive whole-document tree traversals.
-- **Unified persistent `HSplitView` in `MainView`:**
-  Replaced view teardown with a single persistent `HSplitView`:
-  ```swift
-  HSplitView {
-      if model.activeTab != .viewer { TextEditorView(model: model).frame(minWidth: 360, maxWidth: .infinity) }
-      if model.activeTab != .text { viewerContentView.frame(minWidth: 320, maxWidth: .infinity) }
-  }
-  ```
-  Switching between `.text` and `.split` preserves `TextEditorView` without dismantling;
-  switching between `.viewer` and `.split` preserves `TreeViewer`.
 - **Editor cursor and scroll persistence:**
   `JSONDocumentModel` preserves `lastEditorSelectedRange` and `lastEditorScrollOrigin`
   across tab switches. `makeNSView` restores them, and `clearText()` resets them to `.zero`.

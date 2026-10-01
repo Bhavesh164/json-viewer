@@ -443,9 +443,25 @@ public final class JSONDocumentModel: ObservableObject {
         var hints = RestoreHints()
         hints.ids.formUnion(expandedNodeIds)
         hints.ids.formUnion(expandedLeafNodeIds)
-        if let id = selectedNode?.id { hints.ids.insert(id) }
-        if let path = selectedNode?.path { hints.paths.insert(path) }
+        hints.expandedContainerIds = expandedNodeIds
+        hints.expandedLeafIds = expandedLeafNodeIds
+        if let id = selectedNode?.id {
+            hints.ids.insert(id)
+            hints.selectedId = id
+        }
+        if let path = selectedNode?.path {
+            hints.paths.insert(path)
+            hints.selectedPath = path
+        }
         return hints
+    }
+    
+    /// Rebuild the tree asynchronously in the background if dirty or unparsed,
+    /// without blocking the main actor.
+    public func rebuildTreeIfNeeded(silent: Bool = true) {
+        if isDirty || rootNode == nil {
+            startRebuild(silent: silent)
+        }
     }
     
     /// Rebuild the tree, off the main thread once the document is big enough that a
@@ -554,6 +570,10 @@ public final class JSONDocumentModel: ObservableObject {
         var root: JSONNode?
         /// The nodes to carry over from the previous tree, resolved by the parse.
         var restored: RestoredNodes?
+        var selectedNode: JSONNode?
+        var expandedContainerIds: Set<String> = []
+        var expandedLeafIds: Set<String> = []
+        var visibleRows: [FlatTreeRow] = []
         /// Set when the source was Python or a stringified document, so the editor
         /// can be rewritten to standard JSON.
         var rewrittenText: String?
@@ -627,7 +647,38 @@ public final class JSONDocumentModel: ObservableObject {
         }
         
         let root = JSONNode.buildTree(from: parsed, rootKey: "JSON")
-        return ParseOutcome(value: parsed, root: root, restored: restoreNodes(in: root, hints: restore), rewrittenText: rewrittenText)
+        let restored = restoreNodes(in: root, hints: restore)
+        
+        let selected = restore.selectedId.flatMap { restored.byID[$0] }
+            ?? restore.selectedPath.flatMap { restored.byPath[$0] }
+            ?? root
+        
+        var validExpanded = restore.expandedContainerIds.filter { restored.byID[$0]?.isContainer == true }
+        validExpanded.insert(root.id)
+        let validLeafExpanded = restore.expandedLeafIds.filter { restored.byID[$0]?.isLeaf == true }
+        
+        var rows: [FlatTreeRow] = []
+        func traverse(node: JSONNode, depth: Int) {
+            let isExp = validExpanded.contains(node.id)
+            rows.append(FlatTreeRow(node: node, depth: depth, isExpanded: isExp))
+            if isExp, let children = node.children {
+                for child in children {
+                    traverse(node: child, depth: depth + 1)
+                }
+            }
+        }
+        traverse(node: root, depth: 0)
+        
+        return ParseOutcome(
+            value: parsed,
+            root: root,
+            restored: restored,
+            selectedNode: selected,
+            expandedContainerIds: validExpanded,
+            expandedLeafIds: validLeafExpanded,
+            visibleRows: rows,
+            rewrittenText: rewrittenText
+        )
     }
     
     /// The nodes a rebuild has to carry over from the tree it is replacing.
@@ -638,6 +689,10 @@ public final class JSONDocumentModel: ObservableObject {
     private struct RestoreHints: Sendable {
         var ids: Set<String> = []
         var paths: Set<String> = []
+        var expandedContainerIds: Set<String> = []
+        var expandedLeafIds: Set<String> = []
+        var selectedId: String?
+        var selectedPath: String?
     }
     
     /// Resolve just the nodes `hints` asks for, in one walk of the new tree.
@@ -736,13 +791,21 @@ public final class JSONDocumentModel: ObservableObject {
         self.jsonValue = parsed
         self.rootNode = root
         
-        self.selectedNode = previousSelectionID.flatMap { restored.byID[$0] }
+        self.selectedNode = outcome.selectedNode
+            ?? previousSelectionID.flatMap { restored.byID[$0] }
             ?? previousSelectionPath.flatMap { restored.byPath[$0] }
             ?? root
-        self.expandedNodeIds = previousExpandedIds.filter { restored.byID[$0]?.isContainer == true }
-        self.expandedNodeIds.insert(root.id)
-        self.expandedLeafNodeIds = previousExpandedLeafIds.filter { restored.byID[$0]?.isLeaf == true }
-        self.updateVisibleRows()
+        self.expandedNodeIds = outcome.expandedContainerIds.isEmpty
+            ? (previousExpandedIds.filter { restored.byID[$0]?.isContainer == true }.union([root.id]))
+            : outcome.expandedContainerIds
+        self.expandedLeafNodeIds = outcome.expandedLeafIds.isEmpty
+            ? (previousExpandedLeafIds.filter { restored.byID[$0]?.isLeaf == true })
+            : outcome.expandedLeafIds
+        if !outcome.visibleRows.isEmpty {
+            self.visibleTreeRows = outcome.visibleRows
+        } else {
+            self.updateVisibleRows()
+        }
         self.updateSelectedNodeProperties()
         self.parseError = nil
         self.isDirty = false

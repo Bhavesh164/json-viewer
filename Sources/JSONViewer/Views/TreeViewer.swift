@@ -158,15 +158,10 @@ if model.isParsing {
                             }
                         }
                         .onAppear {
-                            if model.treeNavigationRequest > lastHandledNavigationRequest,
-                               let selectedId = model.selectedNode?.id {
-                                lastHandledNavigationRequest = model.treeNavigationRequest
-                                proxy.scrollTo(selectedId, anchor: .center)
-                            } else if model.treeScrollToTopRequest > lastHandledScrollToTopRequest,
-                                      let rootId = model.rootNode?.id {
-                                lastHandledScrollToTopRequest = model.treeScrollToTopRequest
-                                proxy.scrollTo(rootId, anchor: .top)
-                            }
+                            // Synchronize request tracking on appear so switching tabs does not
+                            // trigger an unexpected scroll animation or jump from bottom to top.
+                            lastHandledNavigationRequest = model.treeNavigationRequest
+                            lastHandledScrollToTopRequest = model.treeScrollToTopRequest
                         }
                     }
                 }
@@ -190,8 +185,8 @@ if model.isParsing {
             }
         }
         .onAppear {
-            if model.rootNode == nil || model.isDirty {
-                model.parseAndBuildTree(silent: true)
+            if model.rootNode == nil && !model.isDocumentEmpty {
+                model.rebuildTreeIfNeeded(silent: true)
             }
         }
     }

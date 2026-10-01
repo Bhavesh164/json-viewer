@@ -1360,6 +1360,105 @@ do {
     assertTest(model.lastEditorScrollOrigin == .zero, "Clearing resets editor scroll to zero")
 }
 
+// 34. Benchmark: 5MB JSON edit and tab switch
+do {
+    let count = 40_000
+    let items = (0..<count).map { "{\"id\": \($0), \"name\": \"item_\($0)\", \"value\": \($0 * 2)}" }.joined(separator: ",\n")
+    let json = "[\n" + items + "\n]"
+    print("\n--- 5MB Benchmark ---")
+    print("Document size: \(Double(json.utf8.count) / (1024.0 * 1024.0)) MB (\(json.utf8.count) bytes)")
+    
+    let model = JSONDocumentModel()
+    model.rawText = json
+    let t0 = CFAbsoluteTimeGetCurrent()
+    model.parseAndBuildTree(silent: true)
+    let t1 = CFAbsoluteTimeGetCurrent()
+    print("Initial parseAndBuildTree: \(String(format: "%.4f s", t1 - t0))")
+    print("Initial visible rows: \(model.visibleTreeRows.count)")
+    
+    // Simulate user editing 3rd row while in Text tab:
+    model.selectTab(.text)
+    let fakeSource = FakeTextSource(text: json.replacingOccurrences(of: "\"id\": 0", with: "\"id\": 999999"))
+    model.registerTextSource(fakeSource)
+    model.noteTextSourceEdited(fakeSource)
+    model.markEditedFromEditor(lineCount: count + 2, characterCount: (fakeSource.text as NSString).length)
+    
+    // Now switch to Viewer tab:
+    let t2 = CFAbsoluteTimeGetCurrent()
+    let prevRebuildCount = model.rebuildCount
+    model.selectTab(.viewer)
+    let t3 = CFAbsoluteTimeGetCurrent()
+    print("selectTab(.viewer) synchronous time: \(String(format: "%.4f s", t3 - t2))")
+    print("isParsing right after selectTab: \(model.isParsing)")
+    
+    // Wait for background parse to land:
+    await waitForRebuild(model, from: prevRebuildCount)
+    let t4 = CFAbsoluteTimeGetCurrent()
+    print("Total time until rebuild applied: \(String(format: "%.4f s", t4 - t2))")
+    print("Rebuilt visible rows: \(model.visibleTreeRows.count)")
+    
+    assertTest(model.visibleTreeRows.count == count + 1, "5MB tree has all rows")
+    assertTest(model.isDirty == false, "5MB tree is clean after rebuild")
+    model.unregisterTextSource(fakeSource)
+}
+
+// 35. Test rebuildTreeIfNeeded is non-blocking on dirty large documents and precomputes rows
+print("\n--- Test 35: rebuildTreeIfNeeded non-blocking with precomputed rows ---")
+do {
+    let model = JSONDocumentModel()
+    // Generate a 1MB+ JSON
+    var items: [String] = []
+    for i in 0..<15000 {
+        items.append("{\"id\":\(i),\"tag\":\"test_\(i)\"}")
+    }
+    let bigJSON = "[\n" + items.joined(separator: ",\n") + "\n]"
+    let fakeSource = FakeTextSource(text: bigJSON)
+    model.registerTextSource(fakeSource)
+    model.noteTextSourceEdited(fakeSource)
+    model.markEditedFromEditor(lineCount: 15002, characterCount: (bigJSON as NSString).length)
+    assertTest(model.isDirty == true, "Model is dirty after editor edit")
+    
+    let prevRebuildCount = model.rebuildCount
+    let t0 = CFAbsoluteTimeGetCurrent()
+    model.rebuildTreeIfNeeded(silent: true)
+    let t1 = CFAbsoluteTimeGetCurrent()
+    let elapsed = t1 - t0
+    assertTest(elapsed < 0.05, "rebuildTreeIfNeeded returns immediately (\(String(format: "%.4f s", elapsed)))")
+    assertTest(model.isParsing == true, "rebuildTreeIfNeeded moved work to background")
+    
+    await waitForRebuild(model, from: prevRebuildCount)
+    assertTest(model.isParsing == false, "Background rebuild completed")
+    assertTest(model.isDirty == false, "Model is clean after background rebuild")
+    assertTest(model.visibleTreeRows.count == 15001, "Visible rows precomputed correctly (count: \(model.visibleTreeRows.count))")
+    model.unregisterTextSource(fakeSource)
+}
+
+// 36. Test tab switching does not emit spurious navigation or scroll requests
+print("\n--- Test 36: Tab switching does not emit spurious tree navigation requests ---")
+do {
+    let model = JSONDocumentModel()
+    model.rawText = "{\"a\": 1, \"b\": 2, \"c\": 3}"
+    model.parseAndBuildTree(silent: true)
+    
+    let navReqBefore = model.treeNavigationRequest
+    let scrollReqBefore = model.treeScrollToTopRequest
+    
+    model.selectTab(.text)
+    assertTest(model.activeTab == .text, "Switched to text tab")
+    assertTest(model.treeNavigationRequest == navReqBefore, "No spurious nav request on text tab switch")
+    assertTest(model.treeScrollToTopRequest == scrollReqBefore, "No spurious scroll-to-top request on text tab switch")
+    
+    model.selectTab(.viewer)
+    assertTest(model.activeTab == .viewer, "Switched to viewer tab")
+    assertTest(model.treeNavigationRequest == navReqBefore, "No spurious nav request on viewer tab switch")
+    assertTest(model.treeScrollToTopRequest == scrollReqBefore, "No spurious scroll-to-top request on viewer tab switch")
+    
+    model.selectTab(.split)
+    assertTest(model.activeTab == .split, "Switched to split tab")
+    assertTest(model.treeNavigationRequest == navReqBefore, "No spurious nav request on split tab switch")
+    assertTest(model.treeScrollToTopRequest == scrollReqBefore, "No spurious scroll-to-top request on split tab switch")
+}
+
 print("\n-----------------------------------------")
 print("Total Tests: \(totalTests)")
 print("Passed:      \(passedTests)")
