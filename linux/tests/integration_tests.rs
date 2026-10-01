@@ -470,50 +470,86 @@ fn build_large_doc(items: usize) -> String {
 }
 
 #[test]
-fn repeated_object_keys_get_unique_tree_ids() {
+fn repeated_object_keys_collapse_to_the_last_value() {
     let s = Settings::default();
     let mut m = DocumentModel::new(&s);
-    m.raw_text = r#"{"count":3,"count":23423,"count":23423}"#.to_string();
+    m.raw_text = r#"{"count":3,"count":23423,"count":99999}"#.to_string();
     assert!(m.parse_and_build_tree(true, &s));
 
+    // The tree is a view: a consumer of this document would see one `count`,
+    // the last one, exactly as JSON.parse resolves it.
     let root = m.root.as_ref().unwrap();
-    assert_eq!(root.children.len(), 3, "Parser keeps every repeated key");
-    let ids: std::collections::HashSet<&str> = root.children.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(ids.len(), 3, "Repeated object keys need unique tree node IDs");
-    let values: Vec<String> = root.children.iter().map(|c| c.value_string()).collect();
-    assert_eq!(values, vec!["3".to_string(), "23423".to_string(), "23423".to_string()]);
+    assert_eq!(root.children.len(), 1, "a repeated key collapses to one row");
+    assert_eq!(root.children[0].value_string(), "99999", "the last value wins");
+    assert_eq!(root.children[0].path, "$.count");
 
     m.expand_all();
-    let row_ids: Vec<String> = m
+    let rows: Vec<_> = m.visible_tree_rows.iter().filter(|r| r.key == "count").collect();
+    assert_eq!(rows.len(), 1, "only the last occurrence appears in the tree");
+    assert_eq!(rows[0].value_repr, "99999");
+
+    // The properties panel is a view of the same children, so it agrees.
+    m.selected_id = Some(rows[0].id.clone());
+    let (_, props) = m.properties_for_selected();
+    assert_eq!(props.len(), 1, "the property grid shows one row for the key");
+    assert_eq!(props[0].value, "99999");
+
+    // The text is never rewritten: what the user typed is still in the editor.
+    assert_eq!(m.raw_text, r#"{"count":3,"count":23423,"count":99999}"#);
+    // And Format still round-trips the document as written.
+    m.beautify(&s).unwrap();
+    assert_eq!(m.raw_text.matches("count").count(), 3, "Format keeps every key");
+}
+
+#[test]
+fn duplicate_keys_keep_their_position_and_do_not_disturb_siblings() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = r#"{"a":1,"dup":{"x":1},"b":2,"dup":{"y":2},"c":3}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+    m.expand_all();
+
+    let keys: Vec<&str> = m
         .visible_tree_rows
         .iter()
-        .filter(|r| r.key == "count")
-        .map(|r| r.id.clone())
+        .filter(|r| r.depth == 1)
+        .map(|r| r.key.as_str())
         .collect();
-    assert_eq!(row_ids.len(), 3, "Every repeated entry must appear in the tree");
-    let unique: std::collections::HashSet<&String> = row_ids.iter().collect();
-    assert_eq!(unique.len(), 3);
-    // Rows still share the JSON path shown to the user.
-    for row in m.visible_tree_rows.iter().filter(|r| r.key == "count") {
-        assert_eq!(row.path, "$.count");
-    }
+    assert_eq!(
+        keys,
+        vec!["a", "dup", "b", "c"],
+        "the surviving duplicate keeps the first occurrence's position"
+    );
+    // The surviving value is the last one, and its child comes from that value.
+    let dup = m.visible_tree_rows.iter().find(|r| r.depth == 1 && r.key == "dup").unwrap();
+    assert_eq!(dup.id, "$.dup");
+    let child = m
+        .visible_tree_rows
+        .iter()
+        .find(|r| r.depth == 2)
+        .expect("the surviving duplicate's child is shown");
+    assert_eq!(child.key, "y", "the child comes from the last `dup` value");
+}
 
-    // Repeated entries can be selected independently.
-    m.selected_id = Some(row_ids[1].clone());
-    let (_, props) = m.properties_for_selected();
-    assert_eq!(props.len(), 3);
-    assert_eq!(props[1].value, "23423");
-    assert_eq!(props[1].path, "$.count");
-    let prop_ids: std::collections::HashSet<String> = props.into_iter().map(|p| p.id).collect();
-    assert_eq!(prop_ids.len(), 3, "Property rows keep distinct IDs for jumping");
-
-    // Expanding one repeated container must not expand its sibling.
-    m.raw_text = r#"{"a":{"v":1},"a":{"v":2}}"#.to_string();
+#[test]
+fn duplicate_keys_in_an_array_element_also_collapse() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = r#"[{"email":"first"},{"email":"second"}]"#.to_string();
     assert!(m.parse_and_build_tree(true, &s));
-    m.toggle_expand("$.a");
-    assert_eq!(m.visible_tree_rows.len(), 4, "Only the selected duplicate shows its child");
-    m.toggle_expand("$.a#2");
-    assert_eq!(m.visible_tree_rows.len(), 5);
+    m.expand_all();
+
+    // Both array elements survive, and each shows its own single `email` row.
+    let emails: Vec<(String, String)> = m
+        .visible_tree_rows
+        .iter()
+        .filter(|r| r.key == "email")
+        .map(|r| (r.path.clone(), r.value_repr.clone()))
+        .collect();
+    assert_eq!(emails.len(), 2, "the two array elements are distinct nodes");
+    assert_eq!(emails[0].1, "\"first\"");
+    assert_eq!(emails[1].1, "\"second\"");
+    assert_ne!(emails[0].0, emails[1].0, "each element keeps its own path");
 }
 
 #[test]
@@ -1587,5 +1623,128 @@ fn pending_editor_text_reaches_the_document_on_a_tab_switch() {
         app.doc.raw_text,
         "1{\n  \"a\": 1\n}\n",
         "switching tabs flushes the editor text first"
+    );
+}
+
+/// One Split-tab frame with the given input events.
+fn split_frame(ctx: &egui::Context, app: &mut ViewerApp, events: Vec<egui::Event>) {
+    let mut raw = editor_raw();
+    raw.events = events;
+    let _ = ctx.run(raw, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| app.show_split_tab(ctx, ui));
+    });
+}
+
+/// Screen position where a frame painted the given line of text, so a click can
+/// be aimed at a real row instead of a guessed pixel.
+fn text_position(ctx: &egui::Context, app: &mut ViewerApp, line: &str) -> egui::Pos2 {
+    let out = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| app.show_split_tab(ctx, ui));
+    });
+    for clipped in &out.shapes {
+        if let egui::Shape::Text(ts) = &clipped.shape {
+            if ts.galley.text() == line {
+                return ts.pos;
+            }
+        }
+    }
+    panic!("line {line:?} was not painted, so the click cannot be aimed at it");
+}
+
+/// A primary-button click at `pos`, as two separate frames.
+fn click_events(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+    vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]
+}
+
+fn split_app(ctx: &egui::Context, text: &str) -> ViewerApp {
+    let mut app = ViewerApp::new(Settings::default(), None);
+    app.doc.raw_text = text.to_string();
+    app.doc.update_metrics();
+    app.doc.active_tab = AppTab::Split;
+    app.last_tab = AppTab::Split;
+    app.split_editor.set_text(text);
+    app.editor.set_text(text);
+    // Two settle frames: the first builds the font atlas.
+    split_frame(ctx, &mut app, Vec::new());
+    split_frame(ctx, &mut app, Vec::new());
+    app
+}
+
+/// Reproduces the reported Split-tab sequence: click in the editor, press Home,
+/// then type a line of JSON starting with a quote. Every character has to land.
+#[test]
+fn typing_a_quoted_line_after_home_inserts_every_character() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut app = split_app(&ctx, "{\n  \"name\": \"Adeel\",\n  \"email\": \"rahul\"\n}\n");
+
+    // Click to the right of `"email": "rahul"`, which puts the caret on that line.
+    let line = "  \"email\": \"rahul\"";
+    let at = text_position(&ctx, &mut app, line);
+    let pos = egui::pos2(at.x + 5.0 * 8.0, at.y + 8.0);
+    for pressed in [true, false] {
+        split_frame(&ctx, &mut app, click_events(pos, pressed));
+    }
+    assert_eq!(
+        app.split_editor.cursor().line, 2,
+        "the click landed on the clicked line"
+    );
+
+    // Home, then type the new member and press Enter.
+    split_frame(&ctx, &mut app, vec![key(egui::Key::Home)]);
+    split_frame(
+        &ctx,
+        &mut app,
+        vec![
+            egui::Event::Text("\"email\": \"bhavesh\",".to_string()),
+            key(egui::Key::Enter),
+        ],
+    );
+
+    // Home puts the caret at column 0, so the typed line is inserted ahead of
+    // the rest of the clicked line, then Enter splits them apart.
+    assert_eq!(
+        app.split_editor.text(),
+        "{\n  \"name\": \"Adeel\",\n\"email\": \"bhavesh\",\n  \"email\": \"rahul\"\n}\n",
+        "the whole quoted line must land, including the leading quote"
+    );
+}
+
+/// Arrow keys must move the caret, never focus. The Split tab has other focusable
+/// widgets on screen (the Find field), so egui's spatial focus navigation would
+/// otherwise jump to one of them.
+#[test]
+fn arrow_keys_move_the_caret_without_losing_focus() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut app = split_app(&ctx, "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}\n");
+
+    split_frame(&ctx, &mut app, vec![key(egui::Key::End)]);
+    assert_eq!(app.split_editor.cursor(), Cursor { line: 0, col: 1 });
+
+    for (k, expect) in [
+        (egui::Key::ArrowDown, Cursor { line: 1, col: 1 }),
+        (egui::Key::ArrowRight, Cursor { line: 1, col: 2 }),
+        (egui::Key::ArrowDown, Cursor { line: 2, col: 2 }),
+        (egui::Key::ArrowLeft, Cursor { line: 2, col: 1 }),
+        (egui::Key::ArrowUp, Cursor { line: 1, col: 1 }),
+    ] {
+        split_frame(&ctx, &mut app, vec![key(k)]);
+        assert_eq!(app.split_editor.cursor(), expect, "{k:?} moved the caret");
+    }
+
+    // And typing still reaches the editor after all those arrows.
+    split_frame(&ctx, &mut app, vec![egui::Event::Text("!".to_string())]);
+    assert!(
+        app.split_editor.text().contains('!'),
+        "focus stayed in the editor after arrow navigation"
     );
 }

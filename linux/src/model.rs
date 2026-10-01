@@ -157,8 +157,21 @@ impl Node {
 fn build_node(key: &str, value: &JSONValue, path: &str, id: &str, used_ids: &mut HashSet<String>) -> Node {
     match value {
         JSONValue::Object(pairs) => {
-            let mut children = Vec::with_capacity(pairs.len());
-            for p in pairs {
+            // An object can legally repeat a key, and the editor lets you type
+            // one. The tree is a *view*, so it shows the value a consumer of the
+            // document would actually see: the last occurrence wins, exactly as
+            // `JSON.parse` and friends resolve it. The text itself is left alone,
+            // so nothing the user wrote is silently rewritten.
+            let mut effective: Vec<&crate::json::JSONProperty> = Vec::with_capacity(pairs.len());
+            for (i, p) in pairs.iter().enumerate() {
+                match effective.iter().position(|q| q.key == p.key) {
+                    Some(at) => effective[at] = &pairs[i],
+                    None => effective.push(p),
+                }
+            }
+
+            let mut children = Vec::with_capacity(effective.len());
+            for p in effective {
                 let child_path = format!("{}.{}", path, p.key);
                 let candidate = if id == path { child_path.clone() } else { format!("{}.{}", id, p.key) };
                 let child_id = unique_id(candidate, used_ids);

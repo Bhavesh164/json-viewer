@@ -45,6 +45,17 @@ const BLINK_PERIOD: f32 = 0.5;
 /// Window in which a second click on the same line counts as a triple click.
 const TRIPLE_CLICK_SECONDS: f64 = 0.4;
 
+/// Which keys this widget consumes rather than letting egui use them to move
+/// focus. Mirrors the filter `TextEdit` installs.
+fn event_filter() -> egui::EventFilter {
+    egui::EventFilter {
+        tab: true,
+        horizontal_arrows: true,
+        vertical_arrows: true,
+        escape: true,
+    }
+}
+
 /// Cell metrics that match what egui actually uses when it paints a line.
 ///
 /// epaint does **not** advance by the raw glyph advance: while laying out a
@@ -906,6 +917,23 @@ impl CodeEditor {
             // because `request_focus` simply overwrites.
             ui.memory_mut(|m| m.request_focus(id));
         }
+        // egui moves focus to the nearest widget in the arrow key's direction
+        // unless the focused widget opts out via its event filter, and the
+        // default filter lets arrows through. `set_focus_lock_filter` is what
+        // `TextEdit` uses; without it, pressing an arrow key in the editor
+        // jumps focus to another widget and the caret stops responding.
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                id,
+                egui::EventFilter {
+                    // Tab indents here, so the editor wants it.
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            )
+        });
 
         let (char_w, row_h) = cell_metrics(ui, &font);
         let available = ui.available_size();
@@ -1033,13 +1061,25 @@ impl CodeEditor {
     }
 
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
-        let events = ui.input(|i| i.events.clone());
-        let mut keys = Vec::new();
+        let events = ui.input(|i| i.filtered_events(&event_filter()));
         let mut handled = false;
 
+        // Events are handled in arrival order, interleaving text and keys. Doing
+        // all the text first and the keys afterwards would apply a keystroke to
+        // the caret position from *before* the frame, so a frame carrying both
+        // (key repeat, or the OS batching a key and the character it produced)
+        // would insert text at the wrong place.
         for event in events {
             match event {
                 Event::Text(text) if !text.is_empty() => {
+                    let range = self.selection_range();
+                    self.edit(range, &text, EditDir::Fwd, None);
+                    handled = true;
+                }
+                // An active IME delivers committed text as an Ime event rather
+                // than a Text event, so without this the typed characters would
+                // disappear entirely.
+                Event::Ime(egui::ImeEvent::Commit(text)) if !text.is_empty() => {
                     let range = self.selection_range();
                     self.edit(range, &text, EditDir::Fwd, None);
                     handled = true;
@@ -1066,24 +1106,22 @@ impl CodeEditor {
                     pressed: true,
                     modifiers,
                     ..
-                } => keys.push((key, modifiers)),
+                } => {
+                    // The modifiers carried by the event itself are used, not the
+                    // ones on the frame, so a key press is always interpreted the
+                    // way it was reported.
+                    let ctrl = modifiers.ctrl;
+                    let shift = modifiers.shift;
+                    let alt = modifiers.alt;
+                    // Editor keys are consumed so egui's focus traversal and the
+                    // surrounding scroll area do not also react to them. App-level
+                    // shortcuts (Ctrl+S, Ctrl+O, ...) are deliberately left alone.
+                    if self.handle_key(ui, key, ctrl, shift, alt) {
+                        ui.input_mut(|i| i.consume_key(modifiers, key));
+                        handled = true;
+                    }
+                }
                 _ => {}
-            }
-        }
-
-        for (key, mods) in keys {
-            // The modifiers carried by the event itself are used, not the ones
-            // on the frame, so a key press is always interpreted the way it was
-            // reported.
-            let ctrl = mods.ctrl;
-            let shift = mods.shift;
-            let alt = mods.alt;
-            // Editor keys are consumed so egui's Tab focus traversal and the
-            // surrounding scroll area do not also react to them. App-level
-            // shortcuts (Ctrl+S, Ctrl+O, ...) are deliberately left alone.
-            if self.handle_key(ui, key, ctrl, shift, alt) {
-                ui.input_mut(|i| i.consume_key(mods, key));
-                handled = true;
             }
         }
 

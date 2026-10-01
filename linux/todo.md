@@ -23,6 +23,8 @@
 
 ## Repeated object keys in the tree
 
-- The parser preserves repeated keys such as `{"count": 3, "count": 23423}`, and the properties panel lists each one, but the tree can hide repeated entries because they currently receive the same node ID.
-- Give every tree node a unique, stable internal ID even when multiple object members share the same key or JSON path.
-- Verify that all repeated entries appear in the tree and can be selected independently.
+- A JSON object may repeat a key, and the editor lets you type one, so the tree has to decide what the document means. It shows the value a consumer would actually see: the last occurrence wins, as `JSON.parse` resolves it. Showing every repetition is misleading, because a reader cannot tell which one is in effect.
+- Deduplicate in the tree view only. Never rewrite the text: Format, Minify and Save must round-trip the document exactly as the user typed it, including the repeated key.
+- A duplicate keeps the position of its first occurrence, so the surrounding keys do not move.
+- The properties panel is a view of the same children, so it shows one row per distinct key too.
+- Deduplication is per object, not per document: `"a": [{"k":1},{"k":2}]` still shows two `k` rows because they are different elements.
