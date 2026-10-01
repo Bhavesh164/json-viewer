@@ -48,7 +48,7 @@ public final class JSONDocumentModel: ObservableObject {
                 editorSuppliedMetrics = nil
                 updateTextMetrics()
             }
-            scheduleLiveParseIfInSplitMode()
+            scheduleRebuildIfNeeded()
         }
     }
     
@@ -58,12 +58,30 @@ public final class JSONDocumentModel: ObservableObject {
     /// Incremented when clearing search should return the tree viewport to its root.
     @Published public private(set) var treeScrollToTopRequest: Int = 0
     
+    /// Persisted cursor selection and scroll offset for the text editor across tab switches.
+    public var lastEditorSelectedRange: NSRange?
+    public var lastEditorScrollOrigin: CGPoint?
+    
     @Published public var activeTab: AppTab = .text {
         didSet {
-            cancelScheduledLiveParse()
+            // Switching tabs must not parse. Like the Linux port, the tree is kept
+            // current by the idle rebuild, so a switch is nothing but a view change:
+            // no freeze, and no swap of rows that are already on screen.
             syncRawTextIfNeeded()
-            if (activeTab == .viewer || activeTab == .split) && (rootNode == nil || isDirty) {
-                _ = parseAndBuildTree(silent: false)
+            guard activeTab == .viewer || activeTab == .split else { return }
+            
+            if isDocumentEmpty {
+                // Nothing to show, and nothing to parse.
+                if rootNode != nil || isDirty { discardTree() }
+                showError("JSON error: Please enter JSON code in the Text tab first.")
+                return
+            }
+            
+            // A rebuild is still queued. The user is looking at the tree now, so do not
+            // make them wait out the rest of the debounce.
+            if isDirty && !isParsing {
+                // Not silent: switching tabs has always reported a parse failure.
+                runScheduledRebuild(silent: false)
             }
         }
     }
@@ -313,7 +331,7 @@ public final class JSONDocumentModel: ObservableObject {
         metricsWorkItem?.cancel()
         metricsWorkItem = nil
         metricsGeneration += 1
-        scheduleLiveParseIfInSplitMode()
+        scheduleRebuildIfNeeded()
     }
     
     
@@ -357,36 +375,144 @@ public final class JSONDocumentModel: ObservableObject {
     }
     
 // MARK: - Tab Switching & Validation
+    /// Selecting a tab relies on `activeTab.didSet` to flush the editor's pending
+    /// text and rebuild the tree, so the switch happens in one place whether the tab
+    /// is picked from the toolbar or set directly.
     public func selectTab(_ tab: AppTab) {
-        cancelScheduledLiveParse()
-        syncRawTextIfNeeded()
-        if (tab == .viewer || tab == .split) && (rootNode == nil || isDirty) {
-            _ = self.parseAndBuildTree(silent: false)
-        }
         activeTab = tab
     }
     
-    private var splitLiveParseWorkItem: DispatchWorkItem?
-    private var liveParseTask: Task<Void, Never>?
+    private var scheduledRebuild: DispatchWorkItem?
+    private var rebuildTask: Task<Void, Never>?
+    /// Number of rebuilds currently running in the background, so `isParsing` stays
+    /// true until the last one lands even if some were cancelled.
+    private var inFlightRebuilds = 0
+    /// True while a background rebuild is outstanding. The UI uses it for feedback, and
+    /// a tab switch uses it to avoid starting a rebuild that would be discarded.
+    @Published public private(set) var isParsing: Bool = false
+    /// Incremented every time a rebuild result is applied. Diagnostics, and a way for
+    /// tests to wait for a rebuild rather than guess at the debounce.
+    public private(set) var rebuildCount: Int = 0
+    /// Bumped every time the document text is assigned from something other than the
+    /// editor — a transform, Paste, Open, Clear, or a rewrite to standard JSON.
+    ///
+    /// The editor watches this instead of comparing strings: it only has to touch the
+    /// buffer when the model has actually produced new text, which keeps a
+    /// whole-document comparison off the SwiftUI update path.
+    public private(set) var modelTextRevision: Int = 0
     /// Bumped whenever the document text changes or a parse starts, so a tree
     /// built off the main thread from stale text is discarded instead of applied.
     private var parseSerial = 0
     
-    private func scheduleLiveParseIfInSplitMode() {
-        guard activeTab == .split else { return }
-        cancelScheduledLiveParse()
+    /// Rebuild the tree on idle, in every tab.
+    ///
+    /// This mirrors the Linux port, where `flush_debounced_reparse` is called from the
+    /// Text tab as well as Split. Because the tree is rebuilt while the user is still
+    /// looking at the editor, switching to the Viewer has nothing left to do: no parse,
+    /// no freeze, and no swap of the rows that are already on screen — which is what
+    /// made the tree appear to jump.
+    private func scheduleRebuildIfNeeded() {
+        cancelScheduledRebuild()
+        // The text just changed, so any rebuild in flight is already out of date.
         parseSerial += 1
-        let delay = liveParseDebounceDelay
+        let delay = rebuildDebounceDelay
         let work = DispatchWorkItem { [weak self] in
-            self?.runLiveParse()
+            self?.runScheduledRebuild()
         }
-        splitLiveParseWorkItem = work
+        scheduledRebuild = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
     
-    private func cancelScheduledLiveParse() {
-        splitLiveParseWorkItem?.cancel()
-        splitLiveParseWorkItem = nil
+    private func cancelScheduledRebuild() {
+        scheduledRebuild?.cancel()
+        scheduledRebuild = nil
+    }
+    
+    /// Rebuild the tree after the debounce has elapsed.
+    private func runScheduledRebuild(silent: Bool = true) {
+        scheduledRebuild = nil
+        // Pulling the editor's text in reschedules a rebuild of exactly this text; that
+        // is this rebuild.
+        syncRawTextIfNeeded()
+        cancelScheduledRebuild()
+        startRebuild(silent: silent)
+    }
+    
+    /// Snapshot the navigation state a rebuild has to carry over.
+    private func restoreHints() -> RestoreHints {
+        var hints = RestoreHints()
+        hints.ids.formUnion(expandedNodeIds)
+        hints.ids.formUnion(expandedLeafNodeIds)
+        if let id = selectedNode?.id { hints.ids.insert(id) }
+        if let path = selectedNode?.path { hints.paths.insert(path) }
+        return hints
+    }
+    
+    /// Rebuild the tree, off the main thread once the document is big enough that a
+    /// synchronous rebuild would be felt.
+    ///
+    /// Returns true when the tree is already up to date on return; false means the
+    /// work moved to a background task and `isParsing` is now true.
+    @discardableResult
+    private func startRebuild(silent: Bool) -> Bool {
+        syncRawTextIfNeeded()
+        cancelScheduledRebuild()
+        parseSerial += 1
+        let serial = parseSerial
+        let text = rawText
+        let options = currentParseOptions()
+        let hints = restoreHints()
+        
+        guard Self.exceedsInlineParseLimit(text) else {
+            let outcome = Self.parseDocument(text, options: options, restore: hints)
+            return applyParse(outcome, silent: silent).success
+        }
+        
+        rebuildTask?.cancel()
+        beginRebuild()
+        rebuildTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let outcome = JSONDocumentModel.parseDocument(text, options: options, restore: hints)
+            if Task.isCancelled {
+                // Balance the counter the cancelled task would otherwise never release,
+                // so `isParsing` cannot get stuck on.
+                await self?.endRebuild()
+                return
+            }
+            await self?.finishBackgroundRebuild(outcome, serial: serial, silent: silent)
+        }
+        return true
+    }
+    
+    /// Above this many characters a rebuild moves to a background task.
+    ///
+    /// Parse cost is close to linear in document size — measured at ~48 ms per MB on
+    /// this machine — so a synchronous rebuild is only worth it while it stays under
+    /// roughly one frame. 256K characters is that line: ~10 ms.
+    nonisolated public static func exceedsInlineParseLimit(_ text: String) -> Bool {
+        return (text as NSString).length > 262_144
+    }
+    
+    private func beginRebuild() {
+        inFlightRebuilds += 1
+        isParsing = true
+    }
+    
+    private func endRebuild() {
+        inFlightRebuilds = max(0, inFlightRebuilds - 1)
+        isParsing = inFlightRebuilds > 0
+    }
+    
+    private func finishBackgroundRebuild(_ outcome: ParseOutcome, serial: Int, silent: Bool) {
+        endRebuild()
+        // A newer edit already asked for a rebuild; this result is of a text that no
+        // longer exists.
+        guard serial == parseSerial else { return }
+        rebuildTask = nil
+        // Rewriting the text (Python input, unescaped JSON) schedules another rebuild
+        // of a document that parses to exactly this tree. Drop it.
+        if applyParse(outcome, silent: silent).rewroteText {
+            cancelScheduledRebuild()
+        }
     }
     
     /// How long to wait after the last keystroke before rebuilding the tree.
@@ -396,41 +522,10 @@ public final class JSONDocumentModel: ObservableObject {
     /// triggers a rebuild between keystrokes. The delay grows with the document, so
     /// a big file is only rebuilt after a real pause: 350 ms up to 1 MB, then
     /// +250 ms per MB, capped at 1.5 s.
-    public var liveParseDebounceDelay: TimeInterval {
+    public var rebuildDebounceDelay: TimeInterval {
         let megabytes = Double(characterCount) / (1024.0 * 1024.0)
         let extra = min(1.15, megabytes * 0.25)
         return 0.35 + extra
-    }
-    
-    /// Parse the current text off the main thread, after the debounce has elapsed.
-    private func runLiveParse() {
-        splitLiveParseWorkItem = nil
-        liveParseTask?.cancel()
-        guard activeTab == .split else { return }
-        syncRawTextIfNeeded()
-        // The sync above may have scheduled a parse of the very text we are about to
-        // parse; drop it, and capture the serial after the sync so our own result is
-        // not invalidated by it.
-        cancelScheduledLiveParse()
-        parseSerial += 1
-        let serial = parseSerial
-        let text = rawText
-        let options = currentParseOptions()
-        liveParseTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let outcome = JSONDocumentModel.parseDocument(text, options: options)
-            guard !Task.isCancelled else { return }
-            await self?.finishLiveParse(outcome, serial: serial)
-        }
-    }
-    
-    private func finishLiveParse(_ outcome: ParseOutcome, serial: Int) {
-        guard serial == parseSerial, activeTab == .split else { return }
-        liveParseTask = nil
-        // Rewriting the text (Python input, unescaped JSON) schedules another parse
-        // of a document that parses to exactly this tree. Drop it.
-        if applyParse(outcome, silent: true).rewroteText {
-            cancelScheduledLiveParse()
-        }
     }
     
     /// Settings snapshot, so the parse can run without touching main-actor state.
@@ -457,7 +552,8 @@ public final class JSONDocumentModel: ObservableObject {
     private struct ParseOutcome: @unchecked Sendable {
         var value: JSONValue?
         var root: JSONNode?
-        var index: TreeIndex?
+        /// The nodes to carry over from the previous tree, resolved by the parse.
+        var restored: RestoredNodes?
         /// Set when the source was Python or a stringified document, so the editor
         /// can be rewritten to standard JSON.
         var rewrittenText: String?
@@ -465,45 +561,9 @@ public final class JSONDocumentModel: ObservableObject {
         var isEmptyDocument: Bool = false
     }
     
-    /// Node lookup tables, built with the tree so the main thread only has to apply
-    /// them.
-    private struct TreeIndex: @unchecked Sendable {
-        var nodesByID: [String: JSONNode]
-        var nodesByPath: [String: JSONNode]
-        var containerIds: Set<String>
-        var leafIds: Set<String>
-        
-        init(root: JSONNode) {
-            var byID: [String: JSONNode] = [:]
-            var byPath: [String: JSONNode] = [:]
-            var containers = Set<String>()
-            var leaves = Set<String>()
-            // Iterative walk: a deeply nested document must not risk the stack here.
-            var pending: [JSONNode] = [root]
-            while let node = pending.popLast() {
-                byID[node.id] = node
-                if byPath[node.path] == nil {
-                    byPath[node.path] = node
-                }
-                if node.isContainer {
-                    containers.insert(node.id)
-                } else {
-                    leaves.insert(node.id)
-                }
-                if let children = node.children {
-                    pending.append(contentsOf: children)
-                }
-            }
-            self.nodesByID = byID
-            self.nodesByPath = byPath
-            self.containerIds = containers
-            self.leafIds = leaves
-        }
-    }
-    
     /// Parse `text` and build its tree. Pure: no main-actor state is read or written,
     /// so it can run on a background thread.
-    nonisolated private static func parseDocument(_ text: String, options: ParseOptions) -> ParseOutcome {
+    nonisolated private static func parseDocument(_ text: String, options: ParseOptions, restore: RestoreHints) -> ParseOutcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return ParseOutcome(isEmptyDocument: true)
@@ -518,11 +578,17 @@ public final class JSONDocumentModel: ObservableObject {
                 // 1. If direct parse failed, check if input is a Python dictionary or literal
                 if let pythonParsed = try? PythonLiteralParser.parse(trimmed) {
                     parsed = pythonParsed
-                    rewrittenText = pythonParsed.format(
-                        indentSpaces: options.indentSpaces,
-                        sortKeys: options.sortKeys,
-                        escapeSlashes: options.escapeSlashes
-                    )
+                    // Only a structured document is rewritten to standard JSON. A bare
+                    // Python scalar is left alone on purpose: the rebuild also runs while
+                    // the user is still typing, and quietly turning the word they are
+                    // typing into a quoted string would edit the document under them.
+                    if pythonParsed.isContainer {
+                        rewrittenText = pythonParsed.format(
+                            indentSpaces: options.indentSpaces,
+                            sortKeys: options.sortKeys,
+                            escapeSlashes: options.escapeSlashes
+                        )
+                    }
                 } else if options.autoUnwrapStringified {
                     // 2. Attempt unescape in case of raw stringified JSON
                     let unescaped = JSONValue.unescapeStringifiedJSON(trimmed)
@@ -530,11 +596,13 @@ public final class JSONDocumentModel: ObservableObject {
                         parsed = fallback
                     } else if unescaped != trimmed, let fallbackPython = try? PythonLiteralParser.parse(unescaped) {
                         parsed = fallbackPython
-                        rewrittenText = fallbackPython.format(
-                            indentSpaces: options.indentSpaces,
-                            sortKeys: options.sortKeys,
-                            escapeSlashes: options.escapeSlashes
-                        )
+                        if fallbackPython.isContainer {
+                            rewrittenText = fallbackPython.format(
+                                indentSpaces: options.indentSpaces,
+                                sortKeys: options.sortKeys,
+                                escapeSlashes: options.escapeSlashes
+                            )
+                        }
                     } else {
                         throw initialErr
                     }
@@ -559,24 +627,73 @@ public final class JSONDocumentModel: ObservableObject {
         }
         
         let root = JSONNode.buildTree(from: parsed, rootKey: "JSON")
-        return ParseOutcome(value: parsed, root: root, index: TreeIndex(root: root), rewrittenText: rewrittenText)
+        return ParseOutcome(value: parsed, root: root, restored: restoreNodes(in: root, hints: restore), rewrittenText: rewrittenText)
     }
     
-    /// Parse synchronously on the main actor. Used for explicit user actions, where
-    /// the tree has to be correct the moment it returns.
+    /// The nodes a rebuild has to carry over from the tree it is replacing.
+    ///
+    /// This is a handful of ids and paths, not the whole tree. It is snapshotted on
+    /// the main actor before the work starts, because the nodes it refers to belong
+    /// to the *previous* tree and are about to be thrown away.
+    private struct RestoreHints: Sendable {
+        var ids: Set<String> = []
+        var paths: Set<String> = []
+    }
+    
+    /// Resolve just the nodes `hints` asks for, in one walk of the new tree.
+    ///
+    /// The obvious alternative — index every node by id and by path, plus a set of
+    /// every container and every leaf — cost **0.59 s of the 1.0 s** parse of a
+    /// 900,000-node document, all of it hashing nearly a million long path strings to
+    /// look up one selection and filter two small sets. Because a rebuild normally has
+    /// to restore only the root, the walk stops as soon as everything asked for has
+    /// been found, which for the common case is after the first node.
+    ///
+    /// The worst case — restoring a state that names many nodes, such as after
+    /// Expand All — walks the whole tree, which is still less work than indexing it.
+    nonisolated private static func restoreNodes(in root: JSONNode, hints: RestoreHints) -> RestoredNodes {
+        var byID: [String: JSONNode] = [:]
+        var byPath: [String: JSONNode] = [:]
+        var wantedIDs = hints.ids
+        var wantedPaths = hints.paths
+        if wantedIDs.isEmpty && wantedPaths.isEmpty { return RestoredNodes(byID: byID, byPath: byPath) }
+        
+        // Iterative, so a deeply nested document cannot overflow the stack here.
+        var pending: [JSONNode] = [root]
+        while let node = pending.popLast() {
+            // `remove` reports whether it was there, which keeps a node that answers
+            // to both an id and a path from being counted twice.
+            if wantedIDs.remove(node.id) != nil { byID[node.id] = node }
+            if wantedPaths.remove(node.path) != nil { byPath[node.path] = node }
+            if wantedIDs.isEmpty && wantedPaths.isEmpty { break }
+            if let children = node.children {
+                pending.append(contentsOf: children)
+            }
+        }
+        return RestoredNodes(byID: byID, byPath: byPath)
+    }
+    
+    private struct RestoredNodes: @unchecked Sendable {
+        var byID: [String: JSONNode]
+        var byPath: [String: JSONNode]
+    }
+    
+    /// Parse synchronously on the main actor. Used where the caller needs the tree to
+    /// be correct on return, such as a transform that just rewrote the text.
     @discardableResult
     public func parseAndBuildTree(silent: Bool = false) -> Bool {
         syncRawTextIfNeeded()
         parseSerial += 1
-        let outcome = Self.parseDocument(rawText, options: currentParseOptions())
+        let outcome = Self.parseDocument(rawText, options: currentParseOptions(), restore: restoreHints())
         let result = applyParse(outcome, silent: silent)
         // This parse supersedes anything scheduled: it ran on the same text.
-        cancelScheduledLiveParse()
+        cancelScheduledRebuild()
         return result.success
     }
     
     /// Publish one parse result.
     private func applyParse(_ outcome: ParseOutcome, silent: Bool) -> (success: Bool, rewroteText: Bool) {
+        rebuildCount += 1
         if let err = outcome.error {
             // A non-empty but invalid document keeps the last good tree, flagged out
             // of date, so the user does not lose their place mid-edit.
@@ -597,12 +714,13 @@ public final class JSONDocumentModel: ObservableObject {
             return (false, false)
         }
         
-        guard let parsed = outcome.value, let root = outcome.root, let index = outcome.index else {
+        guard let parsed = outcome.value, let root = outcome.root, let restored = outcome.restored else {
             return (false, false)
         }
         
         // Tree node IDs are JSON paths, so they remain stable across rebuilds.
         // Keep the current navigation state and restore the parts that still exist.
+        // A node that is gone from the new tree simply was not resolved by the parse.
         let previousSelectionID = selectedNode?.id
         let previousSelectionPath = selectedNode?.path
         let previousExpandedIds = expandedNodeIds
@@ -610,7 +728,7 @@ public final class JSONDocumentModel: ObservableObject {
         
         var rewroteText = false
         if let rewritten = outcome.rewrittenText, rewritten != rawText {
-            self.rawText = rewritten
+            setRawTextFromModel(rewritten)
             rewroteText = true
         }
         
@@ -618,12 +736,12 @@ public final class JSONDocumentModel: ObservableObject {
         self.jsonValue = parsed
         self.rootNode = root
         
-        self.selectedNode = previousSelectionID.flatMap { index.nodesByID[$0] }
-            ?? previousSelectionPath.flatMap { index.nodesByPath[$0] }
+        self.selectedNode = previousSelectionID.flatMap { restored.byID[$0] }
+            ?? previousSelectionPath.flatMap { restored.byPath[$0] }
             ?? root
-        self.expandedNodeIds = previousExpandedIds.intersection(index.containerIds)
+        self.expandedNodeIds = previousExpandedIds.filter { restored.byID[$0]?.isContainer == true }
         self.expandedNodeIds.insert(root.id)
-        self.expandedLeafNodeIds = previousExpandedLeafIds.intersection(index.leafIds)
+        self.expandedLeafNodeIds = previousExpandedLeafIds.filter { restored.byID[$0]?.isLeaf == true }
         self.updateVisibleRows()
         self.updateSelectedNodeProperties()
         self.parseError = nil
@@ -658,9 +776,13 @@ public final class JSONDocumentModel: ObservableObject {
     public func clearText() {
         // The model is authoritative here, so any pending editor edit is superseded
         // and the empty document is not re-parsed a moment later.
+        lastEditorSelectedRange = NSRange(location: 0, length: 0)
+        lastEditorScrollOrigin = .zero
         setRawTextFromModel("")
-        cancelScheduledLiveParse()
+        cancelScheduledRebuild()
         parseSerial += 1
+        // A file still being read must not land on top of the cleared document.
+        fileLoadGeneration += 1
         discardTree()
         isDirty = false
     }
@@ -671,6 +793,7 @@ public final class JSONDocumentModel: ObservableObject {
     private func setRawTextFromModel(_ text: String) {
         pendingTextSync = false
         editorSuppliedMetrics = nil
+        modelTextRevision += 1
         rawText = text
     }
     
@@ -1073,11 +1196,10 @@ public final class JSONDocumentModel: ObservableObject {
             return
         }
         
-        let version = self.treeVersion
         var rows: [FlatTreeRow] = []
         func traverse(node: JSONNode, depth: Int) {
             let isExp = expandedNodeIds.contains(node.id)
-            rows.append(FlatTreeRow(node: node, depth: depth, isExpanded: isExp, treeVersion: version))
+            rows.append(FlatTreeRow(node: node, depth: depth, isExpanded: isExp))
             if isExp, let children = node.children {
                 for child in children {
                     traverse(node: child, depth: depth + 1)
@@ -1175,15 +1297,49 @@ public final class JSONDocumentModel: ObservableObject {
 
     
     // MARK: - File I/O
+    private var fileLoadGeneration = 0
+    
+    /// Read on a background queue and rebuild off the main thread for a large file.
+    ///
+    /// Both halves used to run on the main actor: reading a multi-megabyte file, and
+    /// then parsing it. Opening a 24 MB file froze the app for ~0.48 s while the open
+    /// panel was still dismissing.
     public func openFile(url: URL) {
-        do {
-            let data = try Data(contentsOf: url)
-            if let str = String(data: data, encoding: .utf8) {
-                setRawTextFromModel(str)
-                self.parseAndBuildTree(silent: true)
+        // Asking for a file supersedes whatever was pending: an editor edit that has
+        // not been synced, a scheduled rebuild, and a rebuild already in flight.
+        fileLoadGeneration += 1
+        let generation = fileLoadGeneration
+        pendingTextSync = false
+        editorSuppliedMetrics = nil
+        rebuildTask?.cancel()
+        cancelScheduledRebuild()
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var failure: String?
+            var text: String?
+            do {
+                let data = try Data(contentsOf: url)
+                if let decoded = String(data: data, encoding: .utf8) {
+                    text = decoded
+                } else {
+                    failure = "Failed to open file: \(url.lastPathComponent) is not valid UTF-8 text."
+                }
+            } catch {
+                failure = "Failed to open file: \(error.localizedDescription)"
             }
-        } catch {
-            showError("Failed to open file: \(error.localizedDescription)")
+            
+            Task { @MainActor [weak self] in
+                // A newer open, or a clear, happened while this file was being read.
+                guard let self = self, generation == self.fileLoadGeneration else { return }
+                if let text = text {
+                    self.setRawTextFromModel(text)
+                    // Parsing is deferred to a background task for a large document, so
+                    // the tree appears a moment later instead of freezing the app here.
+                    self.startRebuild(silent: true)
+                } else if let failure = failure {
+                    self.showError(failure)
+                }
+            }
         }
     }
     

@@ -375,7 +375,8 @@ being bumped and `clearText` / Split-mode clearing dropping the tree immediately
 
 ## Summary
 
-All six items are implemented on macOS. Two changes beyond the items as written turned
+All six items are implemented on macOS, plus item 7 (tab switching) and item 8 (real-time
+updates), which are the follow-ups that came out of using the app. Two changes beyond the items as written turned
 out to be necessary:
 
 1. `updateNSView` had to learn about `hasPendingTextSync`. Without it the model pushes
@@ -388,7 +389,7 @@ One pre-existing bug was fixed to make verification possible: the search tests a
 synchronously against a search that completes on another thread, so 14 of them failed
 on a clean checkout before any of this work.
 
-The suite is now **210 assertions, all passing**, with coverage added for each item and
+The suite is now **257 assertions, all passing**, with coverage added for each item and
 for the failure modes that are easy to get wrong:
 
 - the incremental line count, checked against a full byte scan for appends, newline
@@ -399,7 +400,210 @@ for the failure modes that are easy to get wrong:
   source deallocated without unregistering;
 - the editor's counts not being reused for a document set from somewhere else, and a
   stale background measurement not landing on top of them;
-- a stale live-parse result being discarded rather than applied.
+- a stale live-parse result being discarded rather than applied;
+- a rebuild of a large document happening in the background: the flag, the applied
+  result, superseded rebuilds, and `isParsing` never getting stuck;
+- the navigation state surviving a rebuild, and being dropped when the node it referred
+  to no longer exists;
+- a file opened in the background, including a missing file and a file that is cleared
+  while still being read;
+- pasted junk and a half-typed word never being rewritten, while a Python dict still is;
+- the model text revision the editor uses to decide it has nothing to hand over;
+- row identity surviving a rebuild, which is what keeps the scroll position.
+
+---
+
+## 7. Switching tabs must not freeze the app
+
+**Status: DONE on macOS.** `startParse(silent:requireSplitMode:)` plus `isParsing`.
+
+This is the follow-up to items 2 and 3, found by actually using the app.
+
+### What happens now
+
+`selectTab` used to rebuild the tree synchronously on the main actor whenever the
+document was dirty, which is exactly the state you are in after typing. So every
+Viewer/Split switch on a large document froze the app for as long as the parse took.
+
+Worst main-loop gap, 24 MB / 1,080,004 lines / 900,002 nodes:
+
+| | before | after |
+| --- | --- | --- |
+| Text → Viewer, dirty | 1.085 s | 0.006 s |
+| Text → Split, dirty | 1.046 s | 0.005 s |
+| open 24 MB file | 0.476 s | 0.006 s |
+| Split-mode live parse | 0.069 s | 0.079 s |
+
+0.005–0.006 s is the 5 ms probe interval, i.e. no blocking at all.
+
+### What was implemented
+
+- `startParse` runs the rebuild inline for small documents and in a `Task.detached`
+  for large ones, so the switch is instant either way. The threshold is
+  `exceedsInlineParseLimit`: 256K characters, chosen because parse cost is linear
+  (~48 ms/MB measured) and 256K is roughly one frame at ~10 ms.
+- `isParsing` is published. It stops a tab switch from starting a rebuild that the
+  in-flight one would discard, drives a small **Parsing…** spinner in the tree toolbar,
+  and replaced the Split-only "Out of date" marker, which is now shown in any tab while
+  a rebuild is pending.
+- The same serial guard as the live parse discards superseded results, so a stale tree
+  can never be applied on top of a newer one.
+- `selectTab` no longer parses; `activeTab.didSet` does. Before, both did, and the
+  second pass was prevented only by `isDirty` having been cleared by the first.
+- `openFile` reads on a background queue and then goes through `startParse`, with a
+  `fileLoadGeneration` guard so a file that is cleared or superseded mid-read never
+  lands. `clearText` bumps that generation too.
+
+The *visible* consequence is that the tree on screen is briefly the previous one, marked
+"Out of date", instead of the app being frozen. That is a deliberate trade: the tree is
+flagged rather than the UI stalling.
+
+### How to verify
+
+Switch between Text, Viewer and Split with a large document loaded, having typed in Text
+first. The tab should change instantly and the tree should update a moment later.
+
+---
+
+## 8. Real-time tree updates, with nothing stale on screen
+
+**Status: DONE on macOS.** Follow-up to item 7, from using the app: *"paste 5 MB, switch
+to Viewer, and the tree scrolls from bottom to up, and it still feels laggy."*
+
+Three separate causes. The first two were introduced by item 7 and the third was a
+long-standing bug that item 7 made visible.
+
+### 8a. The tree was swapped under the user on every switch
+
+`selectTab` rebuilt the tree, which was fast but meant the Viewer first showed the
+*previous* document and then replaced it a few dozen milliseconds later. Replacing the
+rows is what moved the tree on screen.
+
+The fix is Linux's design, which item 7 missed: `flush_debounced_reparse` runs in the
+Text tab as well as Split, so the tree is rebuilt while the user is still looking at the
+editor, and switching tabs never parses. macOS now does the same — `scheduleRebuildIfNeeded`
+has no tab gate, and `activeTab.didSet` only flushes the editor's text.
+
+| paste 5 MB, then switch tabs | switch cost | tree at the moment of the switch |
+| --- | --- | --- |
+| switch within the debounce | 0.0000 s | previous document, rebuild lands right after |
+| pause 2.5 s first, like a human | 0.0000 s | **already the pasted document** |
+
+### 8b. Every rebuild threw away the scroll position
+
+`FlatTreeRow.id` was `"\(treeVersion):\(node.id)"`, and a rebuild bumps `treeVersion`. So
+every row's identity changed, SwiftUI tore the whole list down and laid it out again, and
+the scroll offset was lost. `FlatTreeNodeRow.==` also compared `treeVersion`, forcing every
+row to re-render.
+
+Row identity is now the node path alone, which is stable across rebuilds and unique within
+a tree. Rows update in place, and the scroll position survives.
+
+### 8c. Pasted junk was silently rewritten — a data-loss bug
+
+Found while measuring the above, and it predates this work. `PythonLiteralParser.parse`
+read one value and **never checked that it had consumed the input**. `parseValue` treats
+any bare word as a Python string literal, so:
+
+```
+x
+x
+x
+... 200,000 lines
+```
+
+parsed as `.string("x")`. The caller then treats a successful Python parse as "convert to
+JSON" and assigns `rawText = "x"`. Pasting a document could replace it with a 3-character
+string.
+
+Two fixes:
+
+- `PythonLiteralParser.parse` now requires the whole input to be consumed; trailing content
+  is `ParseError.trailingContent`. A single bare word is still a valid Python string.
+- A rebuild only rewrites the document when the value is an **object or array**. The rebuild
+  runs while the user is typing, and turning the word they are typing into a quoted string
+  would edit the document under them. Converting a Python *dict* still works, which is the
+  feature that was wanted.
+
+### 8d. Two more main-thread costs on the update path
+
+- `updateNSView` compared `textStorage.string != text` on every SwiftUI update — a
+  full-document copy plus compare (~24 ms on 24 MB) once per rebuild. The model now
+  publishes `modelTextRevision`, bumped only when it assigns text from a non-editor
+  source, so the editor can skip the comparison entirely. Every post-init model-side
+  assignment goes through `setRawTextFromModel`, which is what makes the check sound.
+- `makeNSView` applied `.font` and `.foregroundColor` over the whole buffer range after
+  already setting `textView.font` / `textView.textColor`, which apply them themselves.
+  That redundant pass cost 18.5 ms on 24 MB every time a text tab was opened. Removed.
+
+### How to verify
+
+Paste a few MB into the Text tab, wait a moment, then switch to Viewer: the switch is
+instant and the tree does not move. Expand the tree, scroll down, then edit and watch the
+tree rebuild in Split view: the scroll position holds. Paste arbitrary non-JSON text: it is
+never rewritten.
+
+---
+
+## 9. Instant tab switching without scroll animation or view recreation
+
+**Status: DONE on macOS.**
+
+Follow-up to item 8: *"when i tab switch to text to viewer or split why it scrolls from
+bottom to top yet my cursor on text view is right on the top. Please fix the lag of tab
+switches and improve the performance and don't introduce any more bugs."*
+
+### Root Causes
+
+1. **Unconditional animated scroll on appear in `TreeViewer.swift`:**
+   `TreeViewer.onAppear` unconditionally queued a 50 ms async task that invoked
+   `withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(selectedId, anchor: .center) }`.
+   On every tab switch to Viewer or Split (where `treeNavigationRequest` was 0), this
+   fired with `selectedId` set to the root node. Because the newly mounted `ScrollView`
+   in AppKit initialized its bounds at the bottom origin, animating to the top item
+   caused the entire tree to visibly scroll from bottom to top.
+2. **Deep recursive comparison on row diffing:**
+   `FlatTreeNodeRow.==` compared `lhs.row.node.value == rhs.row.node.value`. For container
+   nodes (such as root with tens of thousands of descendants), Swift's `==` operator on
+   `JSONValue` recursively walked every single child, key, and value in the entire
+   multi-megabyte document on every SwiftUI update cycle.
+3. **Full teardown and recreation of views on every tab switch:**
+   `MainView.swift` used a `switch model.activeTab` that completely destroyed and
+   reconstructed `TextEditorView` and `TreeViewer` on every switch between tabs. Switching
+   between `.text` and `.split` deallocated and re-allocated `NSScrollView`, `NSTextView`,
+   and `NSTextStorage`, losing the user's cursor position and scroll state.
+4. **Redundant full-document byte scan on editor adoption:**
+   `adoptDocument` called `JSONDocumentModel.lineCount(of: text)` to count newlines across
+   the entire buffer on every `makeNSView`, even when `model.lineCount` was already
+   calculated and maintained by the model.
+
+### What was implemented
+
+- **Request-guarded tree navigation:**
+  `TreeViewer` tracks `lastHandledNavigationRequest` and `lastHandledScrollToTopRequest`.
+  `onAppear` only scrolls if an unhandled navigation request was pending (e.g. from a search
+  performed while offscreen), and does so immediately without animation. Normal tab switches
+  (`treeNavigationRequest == 0`) do not scroll at all, opening immediately at the top.
+- **O(1) container row diffing:**
+  `FlatTreeNodeRow.==` compares `lhs.row.node.typeBadgeText == rhs.row.node.typeBadgeText`
+  for container nodes (which only render their key and item count badge), and only compares
+  scalar values for leaf nodes. This eliminates recursive whole-document tree traversals.
+- **Unified persistent `HSplitView` in `MainView`:**
+  Replaced view teardown with a single persistent `HSplitView`:
+  ```swift
+  HSplitView {
+      if model.activeTab != .viewer { TextEditorView(model: model).frame(minWidth: 360, maxWidth: .infinity) }
+      if model.activeTab != .text { viewerContentView.frame(minWidth: 320, maxWidth: .infinity) }
+  }
+  ```
+  Switching between `.text` and `.split` preserves `TextEditorView` without dismantling;
+  switching between `.viewer` and `.split` preserves `TreeViewer`.
+- **Editor cursor and scroll persistence:**
+  `JSONDocumentModel` preserves `lastEditorSelectedRange` and `lastEditorScrollOrigin`
+  across tab switches. `makeNSView` restores them, and `clearText()` resets them to `.zero`.
+- **Fast line count adoption:**
+  `adoptDocument` reuses `model.lineCount` when adopting `model.rawText`, avoiding redundant
+  scanning of multi-megabyte buffers.
 
 ---
 

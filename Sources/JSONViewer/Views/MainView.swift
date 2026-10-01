@@ -22,14 +22,14 @@ public struct MainView: View {
     
     @ViewBuilder
     private var mainContent: some View {
-        VStack(spacing: 0) {
-            switch model.activeTab {
-            case .viewer:
-                viewerContentView
-            case .text:
+        HSplitView {
+            if model.activeTab != .viewer {
                 TextEditorView(model: model)
-            case .split:
-                splitContentView
+                    .frame(minWidth: 360, maxWidth: .infinity)
+            }
+            if model.activeTab != .text {
+                viewerContentView
+                    .frame(minWidth: 320, maxWidth: .infinity)
             }
         }
     }
@@ -89,42 +89,17 @@ public struct MainView: View {
         VStack(spacing: 0) {
             HSplitView {
                 TreeViewer(model: model)
-                    .frame(minWidth: 320, maxWidth: .infinity)
+                    .frame(minWidth: 280, maxWidth: .infinity)
                 
                 if model.isPropertiesVisible {
                     PropertyGridView(model: model)
-                        .frame(minWidth: 260, idealWidth: 340, maxWidth: 600)
+                        .frame(minWidth: 220, idealWidth: 280, maxWidth: 500)
                 }
             }
             
             if model.isSearchVisible {
                 SearchToolbar(model: model)
             }
-        }
-    }
-    
-    // MARK: - Modern Split Mode (Live Editor on Left + Tree & Grid on Right)
-    private var splitContentView: some View {
-        HSplitView {
-            TextEditorView(model: model)
-                .frame(minWidth: 360, maxWidth: .infinity)
-            
-            VStack(spacing: 0) {
-                HSplitView {
-                    TreeViewer(model: model)
-                        .frame(minWidth: 280, maxWidth: .infinity)
-                    
-                    if model.isPropertiesVisible {
-                        PropertyGridView(model: model)
-                            .frame(minWidth: 220, idealWidth: 280, maxWidth: 500)
-                    }
-                }
-                
-                if model.isSearchVisible {
-                    SearchToolbar(model: model)
-                }
-            }
-            .frame(minWidth: 500, maxWidth: .infinity)
         }
     }
 }

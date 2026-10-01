@@ -11,6 +11,7 @@ public struct PythonLiteralParser {
         case invalidKey(Int)
         case expectedColon(Int)
         case unmatchedBracket(Character, Int)
+        case trailingContent(Int)
         
         public var errorDescription: String? {
             switch self {
@@ -24,6 +25,8 @@ public struct PythonLiteralParser {
                 return "Expected ':' after dictionary key at offset \(pos)."
             case .unmatchedBracket(let ch, let pos):
                 return "Unmatched bracket '\(ch)' at offset \(pos)."
+            case .trailingContent(let pos):
+                return "Unexpected trailing content at offset \(pos): a Python literal is a single value."
             }
         }
     }
@@ -57,6 +60,16 @@ public struct PythonLiteralParser {
         }
         let val = try parser.parseValue()
         parser.skipWhitespaceAndComments()
+        // A literal is exactly one value, so the whole input has to be consumed.
+        //
+        // Without this check `parseValue` accepted any text whose first token was a
+        // bare word as a string literal and silently ignored everything after it: "x"
+        // followed by 200,000 lines of junk parsed as `.string("x")`, and the caller
+        // then rewrote the document to `"x"` — throwing away whatever the user had
+        // actually pasted.
+        guard !parser.hasMore else {
+            throw ParseError.trailingContent(parser.currentOffset)
+        }
         return val
     }
     
@@ -65,6 +78,9 @@ public struct PythonLiteralParser {
     private var hasMore: Bool {
         index < text.endIndex
     }
+    
+    /// Where the parser stopped, for error reporting.
+    private var currentOffset: Int { offset }
     
     private var current: Character {
         guard hasMore else { return "\0" }

@@ -4,6 +4,8 @@ import JSONViewerCore
 
 public struct TreeViewer: View {
     @ObservedObject var model: JSONDocumentModel
+    @UIState private var lastHandledNavigationRequest: Int = 0
+    @UIState private var lastHandledScrollToTopRequest: Int = 0
     
     public init(model: JSONDocumentModel) {
         self.model = model
@@ -77,11 +79,27 @@ public struct TreeViewer: View {
                 
                 Spacer()
 
-                if model.activeTab == .split && model.isDirty && model.rootNode != nil {
+if model.isParsing {
+                    // A large document is rebuilt off the main thread, so the tree
+                    // arrives a moment after the tab does. Say so, rather than looking
+                    // frozen.
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.7)
+                        Text("Parsing…")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .help("Rebuilding the tree. Large documents are parsed off the main thread so the app stays responsive.")
+                } else if model.isDirty && model.rootNode != nil {
+                    // While a rebuild is pending, the tree on screen is the last good
+                    // one. That can happen in any tab now, since a large document is
+                    // rebuilt in the background.
                     Label("Out of date", systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.orange)
-                        .help("This tree shows the last valid JSON. It will update when the editor contains valid JSON.")
+                        .help("This tree shows the last parsed JSON. It updates when the rebuild finishes.")
                 }
                 
                 if let selected = model.selectedNode {
@@ -114,42 +132,40 @@ public struct TreeViewer: View {
                             .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
                         }
                         .background(Color(nsColor: .textBackgroundColor))
-                        .onChange(of: model.treeNavigationRequest) { _ in
-                            guard let selectedId = model.selectedNode?.id else { return }
-                            let destination = "\(model.treeVersion):\(selectedId)"
-                            let request = model.treeNavigationRequest
+                        .onChange(of: model.treeNavigationRequest) { request in
+                            guard request > lastHandledNavigationRequest, let selectedId = model.selectedNode?.id else { return }
+                            lastHandledNavigationRequest = request
                             let topRequest = model.treeScrollToTopRequest
                             // Wait for SwiftUI to lay out the newly expanded lazy row.
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                 guard request == model.treeNavigationRequest,
                                       topRequest == model.treeScrollToTopRequest else { return }
                                 withAnimation(.easeInOut(duration: 0.15)) {
-                                    proxy.scrollTo(destination, anchor: .center)
+                                    proxy.scrollTo(selectedId, anchor: .center)
                                 }
                             }
                         }
-                        .onChange(of: model.treeScrollToTopRequest) { _ in
-                            guard let rootId = model.rootNode?.id else { return }
-                            let destination = "\(model.treeVersion):\(rootId)"
-                            let request = model.treeScrollToTopRequest
+                        .onChange(of: model.treeScrollToTopRequest) { request in
+                            guard request > lastHandledScrollToTopRequest, let rootId = model.rootNode?.id else { return }
+                            lastHandledScrollToTopRequest = request
                             let navigationRequest = model.treeNavigationRequest
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                 guard request == model.treeScrollToTopRequest,
                                       navigationRequest == model.treeNavigationRequest else { return }
                                 withAnimation(.easeInOut(duration: 0.15)) {
-                                    proxy.scrollTo(destination, anchor: .top)
+                                    proxy.scrollTo(rootId, anchor: .top)
                                 }
                             }
                         }
                         .onAppear {
-                            guard let selectedId = model.selectedNode?.id else { return }
-                            let destination = "\(model.treeVersion):\(selectedId)"
-                            let request = model.treeNavigationRequest
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                guard request == model.treeNavigationRequest else { return }
-                                withAnimation(.easeInOut(duration: 0.15)) {
-                                    proxy.scrollTo(destination, anchor: .center)
-                                }
+                            if model.treeNavigationRequest > lastHandledNavigationRequest,
+                               let selectedId = model.selectedNode?.id {
+                                lastHandledNavigationRequest = model.treeNavigationRequest
+                                proxy.scrollTo(selectedId, anchor: .center)
+                            } else if model.treeScrollToTopRequest > lastHandledScrollToTopRequest,
+                                      let rootId = model.rootNode?.id {
+                                lastHandledScrollToTopRequest = model.treeScrollToTopRequest
+                                proxy.scrollTo(rootId, anchor: .top)
                             }
                         }
                     }
@@ -212,10 +228,11 @@ struct FlatTreeNodeRow: View, Equatable {
     @UIState private var isCopied: Bool = false
     
     static func == (lhs: FlatTreeNodeRow, rhs: FlatTreeNodeRow) -> Bool {
-        lhs.row.treeVersion == rhs.row.treeVersion &&
         lhs.row.node.id == rhs.row.node.id &&
         lhs.row.node.key == rhs.row.node.key &&
-        lhs.row.node.value == rhs.row.node.value &&
+        (lhs.row.isContainer ?
+            lhs.row.node.typeBadgeText == rhs.row.node.typeBadgeText :
+            lhs.row.node.value == rhs.row.node.value) &&
         lhs.row.depth == rhs.row.depth &&
         lhs.row.isExpanded == rhs.row.isExpanded &&
         lhs.isSelected == rhs.isSelected &&

@@ -198,19 +198,24 @@ public final class JSONNode: Identifiable, ObservableObject, @unchecked Sendable
 }
 
 public struct FlatTreeRow: Identifiable, @unchecked Sendable {
-    public var id: String { "\(treeVersion):\(node.id)" }
+    /// The node's path, which is stable across rebuilds.
+    ///
+    /// It deliberately does *not* include the tree version. Changing every row's
+    /// identity on each rebuild makes SwiftUI tear the list down and lay it out again,
+    /// which threw away the scroll position and made a large tree visibly jump when a
+    /// rebuild landed. Node paths are unique within a tree, so the path alone identifies
+    /// a row, and a rebuild updates rows in place instead.
+    public var id: String { node.id }
     public let node: JSONNode
     public let depth: Int
     public let isExpanded: Bool
     public let isContainer: Bool
-    public let treeVersion: Int
     
-    public init(node: JSONNode, depth: Int, isExpanded: Bool, treeVersion: Int = 0) {
+    public init(node: JSONNode, depth: Int, isExpanded: Bool) {
         self.node = node
         self.depth = depth
         self.isExpanded = isExpanded
         self.isContainer = node.isContainer
-        self.treeVersion = treeVersion
     }
 }
 

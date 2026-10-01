@@ -25,6 +25,15 @@ func waitFor(_ description: String, timeout: TimeInterval = 5.0, _ condition: ()
     }
 }
 
+/// Wait for the next rebuild to be applied.
+///
+/// `isParsing` is still false while a rebuild sits in the debounce, so waiting on it
+/// alone returns before anything has happened.
+@MainActor
+func waitForRebuild(_ model: JSONDocumentModel, from baseline: Int, timeout: TimeInterval = 20.0) async {
+    await waitFor("a rebuild to be applied", timeout: timeout) { model.rebuildCount > baseline }
+}
+
 /// Stand-in for the native editor in the text-sync tests: it owns the text and the
 /// model has to ask for it.
 @MainActor
@@ -668,7 +677,7 @@ do {
     assertTest(model.treeVersion == initialVersion + 1, "Tree version incremented after parsing initial text")
     let originalTitleRow = model.visibleTreeRows.first(where: { $0.node.key == "title" })
     assertTest(originalTitleRow?.node.value == .string("Original Title"), "Original title is parsed")
-    assertTest(originalTitleRow?.id == "\(initialVersion + 1):$.title", "Row id contains treeVersion")
+    assertTest(originalTitleRow?.id == "$.title", "Row id is the node path")
     
     // Switch to Text tab and edit input
     model.selectTab(.text)
@@ -685,7 +694,10 @@ do {
     assertTest(model.treeVersion == initialVersion + 2, "Tree version incremented on first switch")
     let updatedTitleRow = model.visibleTreeRows.first(where: { $0.node.key == "title" })
     assertTest(updatedTitleRow?.node.value == .string("Updated Title"), "Updated title reflected on FIRST switch")
-    assertTest(updatedTitleRow?.id == "\(initialVersion + 2):$.title", "Row id contains new treeVersion")
+    // Row identity must not change when the tree is rebuilt: if it did, SwiftUI would
+    // tear the whole list down and lose the scroll position.
+    assertTest(updatedTitleRow?.id == "$.title", "Row id is unchanged by a rebuild")
+    assertTest(updatedTitleRow?.id == originalTitleRow?.id, "The same node keeps the same row id across rebuilds")
     
     let newFieldRow = model.visibleTreeRows.first(where: { $0.node.key == "newField" })
     assertTest(newFieldRow?.node.value == .bool(true), "New field reflected on FIRST switch")
@@ -913,6 +925,37 @@ do {
     assertTest(model.hasPendingTextSync == false, "A dead source does not leave the text permanently unsynced")
 }
 
+// 26c. The text revision the editor uses to decide whether it needs to be updated at
+// all. Getting this wrong means either not typing text back, or reverting an edit.
+do {
+    let model = JSONDocumentModel()
+    let source = FakeTextSource(text: "{\"a\": 1}")
+    model.registerTextSource(source)
+    let base = model.modelTextRevision
+    
+    // An editor edit does not bump it: the buffer already has that text.
+    model.noteTextSourceEdited(source)
+    model.markEditedFromEditor(lineCount: 1, characterCount: 8)
+    assertTest(model.modelTextRevision == base, "An editor edit does not bump the model text revision")
+    model.syncRawTextIfNeeded()
+    assertTest(model.modelTextRevision == base, "Syncing the editor's text does not bump the revision")
+    
+    // Everything that produces new text from the model does.
+    model.rawText = "{\"a\": 2}"
+    assertTest(model.modelTextRevision == base, "A direct assignment outside setRawTextFromModel is not expected")
+    
+    model.beautifyText()
+    let afterBeautify = model.modelTextRevision
+    assertTest(afterBeautify > base, "A transform bumps the model text revision")
+    
+    model.minifyText()
+    assertTest(model.modelTextRevision > afterBeautify, "Another transform bumps it again")
+    
+    model.clearText()
+    assertTest(model.modelTextRevision > 0, "Clearing bumps the model text revision")
+    model.unregisterTextSource(source)
+}
+
 // 27. Emptying the document drops the stale tree, selection and error.
 do {
     let model = JSONDocumentModel()
@@ -969,18 +1012,32 @@ do {
     model.rawText = "{\"a\":1}\n{\"b\":2}"
     assertTest(model.lineCount == 2 && model.characterCount == 15, "A model-side edit is measured, not given the editor's counts")
 
-    // An editor edit on a document too large to measure synchronously: the pending
-    // background measurement of the previous text must not land on top of it.
-    model.rawText = String(repeating: "x\n", count: 20_000)
-    model.markEditedFromEditor(lineCount: 40_001, characterCount: 80_000)
-    try? await Task.sleep(nanoseconds: 400_000_000)
-    assertTest(model.lineCount == 40_001 && model.characterCount == 80_000, "An editor edit is not overwritten by a stale background measurement")
-
     // Emptying the document through the editor is reflected immediately.
     source.text = ""
+    model.noteTextSourceEdited(source)
     model.markEditedFromEditor(lineCount: 1, characterCount: 0)
     assertTest(model.isDocumentEmpty, "An editor deletion reports an empty document")
     model.unregisterTextSource(source)
+
+    // An editor edit on a document too large to measure synchronously: the pending
+    // background measurement of the previous text must not land on top of it, and the
+    // idle rebuild that syncs the editor must not invent different numbers.
+    let big = String(repeating: "x\n", count: 20_000)
+    let bigSource = FakeTextSource(text: big)
+    model.registerTextSource(bigSource)
+    model.noteTextSourceEdited(bigSource)
+    model.rawText = String(repeating: "y\n", count: 20_000)
+    model.markEditedFromEditor(lineCount: 20_001, characterCount: (big as NSString).length)
+    // The document is still the "y" text: the editor is ahead of the model.
+    assertTest(model.rawText.hasPrefix("y\n"), "The editor's text has not been pulled in yet")
+    // Wait for the rebuild itself, not just for the in-flight flag, which is still
+    // false while the debounce is running.
+    await waitFor("the idle rebuild to sync the editor and finish", timeout: 20.0) {
+        model.rawText == big && model.isParsing == false
+    }
+    assertTest(model.rawText == big, "The idle rebuild synced the editor's text")
+    assertTest(model.lineCount == 20_001 && model.characterCount == (big as NSString).length, "An editor edit is not overwritten by a stale background measurement")
+    model.unregisterTextSource(bigSource)
 }
 
 // 28. The editor's incremental line count must match a full scan for every kind of
@@ -1044,24 +1101,24 @@ do {
     let model = JSONDocumentModel()
     model.rawText = ""
     assertTest(model.characterCount == 0, "Empty document reports no characters")
-    assertTest(model.liveParseDebounceDelay == 0.35, "Empty document uses the base 350 ms debounce")
+    assertTest(model.rebuildDebounceDelay == 0.35, "Empty document uses the base 350 ms debounce")
 
     // 350 ms up to 1 MB, then +250 ms per MB.
     model.rawText = String(repeating: "x", count: 512 * 1024)
-    assertTest(model.liveParseDebounceDelay == 0.475, "Debounce grows by 250 ms per MB")
+    assertTest(model.rebuildDebounceDelay == 0.475, "Debounce grows by 250 ms per MB")
 
     model.rawText = String(repeating: "x", count: 1024 * 1024)
-    assertTest(model.liveParseDebounceDelay == 0.6, "Debounce reaches 600 ms at 1 MB")
+    assertTest(model.rebuildDebounceDelay == 0.6, "Debounce reaches 600 ms at 1 MB")
 
     model.rawText = String(repeating: "x", count: 40 * 1024 * 1024)
-    assertTest(model.liveParseDebounceDelay == 1.5, "Debounce is capped at 1.5 s")
+    assertTest(model.rebuildDebounceDelay == 1.5, "Debounce is capped at 1.5 s")
 
     // The character count must be available synchronously even for a document large
     // enough that its line count is measured off the main thread, because that count
     // is what sizes the debounce.
     model.rawText = String(repeating: "{\n", count: 30_000)
     assertTest(model.characterCount == 60_000, "Character count is measured synchronously on a large document")
-    assertTest(model.liveParseDebounceDelay > 0.35, "A large document gets a longer debounce immediately")
+    assertTest(model.rebuildDebounceDelay > 0.35, "A large document gets a longer debounce immediately")
 
     var builder = ""
     for i in 0..<5000 { builder += "line \(i)\n" }
@@ -1089,6 +1146,218 @@ do {
     model.clearText()
     assertTest(model.rootNode == nil, "Clearing in Split mode drops the tree straight away")
     assertTest(model.isDocumentEmpty, "Clearing in Split mode marks the document empty")
+}
+
+// 30. A tab switch on a large document must not block: the rebuild moves off the
+// main thread and is published when it lands.
+do {
+    // Comfortably past the 256K character inline limit, but small enough to keep the
+    // suite quick.
+    let big = (0..<6_000).map { "{\"id\": \"id-\($0)\", \"name\": \"user_\($0)\", \"tags\": [\"a\", \"b\"]}" }
+        .joined(separator: ",\n")
+    let bigJSON = "[\n\(big)\n]"
+    assertTest(JSONDocumentModel.exceedsInlineParseLimit(bigJSON), "A document past the inline limit is parsed off the main thread")
+    assertTest(!JSONDocumentModel.exceedsInlineParseLimit("{\"a\": 1}"), "A small document is still parsed inline")
+
+    let model = JSONDocumentModel()
+    model.rawText = "{\"title\": \"first\"}"
+    _ = model.parseAndBuildTree(silent: true)
+    assertTest(model.isParsing == false, "An inline rebuild reports no background parse")
+
+    // A dirty tab switch onto a large document.
+    model.rawText = bigJSON
+    let versionBefore = model.treeVersion
+    model.selectTab(.viewer)
+    assertTest(model.isParsing, "A large rebuild reports that it is in flight")
+    assertTest(model.activeTab == .viewer, "The tab switches immediately even while the rebuild is in flight")
+
+    await waitFor("the background rebuild to finish", timeout: 20.0) { model.isParsing == false }
+    assertTest(model.isParsing == false, "The background rebuild clears its flag")
+    assertTest(model.treeVersion == versionBefore + 1, "The background rebuild is applied")
+    assertTest(model.rootNode?.children?.count == 6_000, "The rebuilt tree has every item")
+    assertTest(model.isDirty == false, "The rebuilt tree clears the dirty flag")
+    assertTest(model.parseError == nil, "The rebuilt tree has no parse error")
+
+    // A stale result must be discarded rather than applied: edit again while the
+    // first rebuild is still running.
+    model.selectTab(.text)
+    model.rawText = "[\n\(big)\n]"
+    model.selectTab(.viewer)
+    model.rawText = bigJSON
+    await waitFor("the superseded rebuilds to settle", timeout: 30.0) { model.isParsing == false }
+    assertTest(model.rootNode?.children?.count == 6_000, "A superseded rebuild is not applied on top of the newest one")
+    assertTest(model.isParsing == false, "isParsing never gets stuck after superseded rebuilds")
+
+    // Emptying a large document while a rebuild is in flight must still clear the tree.
+    model.selectTab(.text)
+    model.rawText = bigJSON
+    model.selectTab(.viewer)
+    await waitFor("the rebuild to finish", timeout: 20.0) { model.isParsing == false }
+    model.clearText()
+    assertTest(model.rootNode == nil, "Clearing after a background rebuild still drops the tree")
+    assertTest(model.isParsing == false, "Clearing does not leave a parse in flight")
+}
+
+do {
+    // 30b. Opening a file reads and rebuilds off the main thread, and a file that is
+    // cleared or superseded while being read never lands.
+        let model = JSONDocumentModel()
+        let big = (0..<6_000).map { "{\"id\": \"id-\($0)\", \"name\": \"user_\($0)\"}" }.joined(separator: ",\n")
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("jsonviewer-tests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+    
+        let goodURL = dir.appendingPathComponent("good.json")
+        let fileText = "{\"title\": \"opened\", \"items\": [\(big)]}"
+        try fileText.write(to: goodURL, atomically: true, encoding: .utf8)
+    
+        model.openFile(url: goodURL)
+        // The text is not there yet: the read is still in flight.
+        let fileContents = try String(contentsOf: goodURL, encoding: .utf8)
+        assertTest(model.rawText != fileContents, "Opening a file does not block on the read")
+        await waitFor("the file to be read and rebuilt", timeout: 20.0) {
+            model.rawText.contains("\"title\": \"opened\"") && model.isParsing == false
+        }
+        assertTest(model.rootNode?.key == "JSON", "The opened document is parsed")
+        assertTest(model.rootNode?.children?.first?.key == "title", "The opened document has the expected shape")
+    
+        // Clearing while a file is being read must win.
+        let slowURL = dir.appendingPathComponent("slow.json")
+        try "{\"title\": \"should never appear\"}".write(to: slowURL, atomically: true, encoding: .utf8)
+        model.openFile(url: slowURL)
+        model.clearText()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        assertTest(model.rawText.isEmpty, "A file still being read does not overwrite a cleared document")
+        assertTest(model.rootNode == nil, "A cleared document stays cleared while a file is in flight")
+    
+        // A missing file reports the failure instead of silently doing nothing.
+        let model2 = JSONDocumentModel()
+        model2.openFile(url: dir.appendingPathComponent("does-not-exist.json"))
+        await waitFor("the missing file to be reported", timeout: 10.0) { model2.isErrorAlertPresented }
+        assertTest(model2.isErrorAlertPresented, "A missing file raises an error")
+        assertTest(model2.errorMessage.contains("Failed to open file"), "The error explains what failed")
+} catch {
+    assertTest(false, "File-open tests failed to run: \(error)")
+}
+
+// 31. Rebuilding carries the navigation state over without indexing the whole tree.
+do {
+    let model = JSONDocumentModel()
+    let json = """
+    {
+      "store": {
+        "book": [
+          { "title": "Swift", "price": 49.99, "tags": ["a", "b"] },
+          { "title": "Rust", "price": 39.99, "tags": ["c"] }
+        ]
+      }
+    }
+    """
+    model.rawText = json
+    _ = model.parseAndBuildTree(silent: true)
+
+    // root -> store -> book (array) -> first item -> its properties
+    let bookArray = model.rootNode!.children![0].children![0]
+    let book = bookArray.children![0]
+    let price = book.children!.first { $0.key == "price" }!
+    let tag = book.children!.first { $0.key == "tags" }!
+    model.toggleExpand(nodeId: bookArray.id)
+    model.toggleExpand(nodeId: book.id)
+    model.selectAndReveal(node: tag)
+    let rowsBefore = model.visibleTreeRows.count
+
+    // Rebuild with unrelated edits elsewhere; the paths still resolve.
+    model.rawText = json.replacingOccurrences(of: "\"price\": 49.99", with: "\"price\": 59.99")
+    _ = model.parseAndBuildTree(silent: true)
+
+    assertTest(model.selectedNode?.path == "$.store.book[0].tags", "A deep selection survives a rebuild")
+    assertTest(model.expandedNodeIds.contains(bookArray.id) && model.expandedNodeIds.contains(book.id), "Expanded containers survive a rebuild")
+    assertTest(model.visibleTreeRows.count == rowsBefore, "The rebuilt tree has the same shape")
+    let rebuiltPrice = model.rootNode!.children![0].children![0].children![0].children!.first { $0.key == "price" }
+    assertTest(rebuiltPrice?.valueString == "59.99", "The rebuilt tree shows the new value")
+
+    // A selected leaf that the property grid expands keeps its state too.
+    model.toggleExpandLeaf(nodeId: price.id)
+    _ = model.parseAndBuildTree(silent: true)
+    assertTest(model.expandedLeafNodeIds.contains(price.id), "An expanded leaf survives a rebuild")
+
+    // Now remove the selected branch entirely: the state must be dropped, not restored
+    // onto whatever node happens to sit at that path now.
+    model.rawText = "{\"store\": 5}"
+    _ = model.parseAndBuildTree(silent: true)
+    assertTest(model.selectedNode?.path == "$", "A selection that no longer exists falls back to the root")
+    assertTest(model.expandedNodeIds.count == 1, "Expansion of nodes that no longer exist is dropped")
+    // The root stays expanded, so it and its one remaining child are the only rows.
+    assertTest(model.visibleTreeRows.count == 2, "Only the root and its child are left after everything vanished")
+    assertTest(model.expandedLeafNodeIds.isEmpty, "Leaf expansion of nodes that no longer exists is dropped")
+}
+
+// 32. A Python literal is one value: junk must not parse, and must never rewrite the
+// document. This was destroying whatever the user had pasted.
+do {
+    assertTest((try? PythonLiteralParser.parse("x\nx\nx\n")) == nil, "A bare word followed by junk is not a Python literal")
+    assertTest((try? PythonLiteralParser.parse("hello")) != nil, "A bare word on its own is still a Python string")
+    assertTest((try? PythonLiteralParser.parse("{'a': 1} trailing")) == nil, "Trailing content after a Python dict is rejected")
+    assertTest((try? PythonLiteralParser.parse("{'a': 1}")) != nil, "A complete Python dict still parses")
+    assertTest((try? PythonLiteralParser.parse("# just a comment\n{'a': 1}")) != nil, "Comments around a Python dict are still fine")
+    
+    // The document itself must survive a rebuild of junk.
+    let junk = String(repeating: "x\n", count: 5_000)
+    let model = JSONDocumentModel()
+    let source = FakeTextSource(text: junk)
+    model.registerTextSource(source)
+    model.noteTextSourceEdited(source)
+    let beforeJunk = model.rebuildCount
+    model.markEditedFromEditor(lineCount: 5_000, characterCount: (junk as NSString).length)
+    await waitForRebuild(model, from: beforeJunk)
+    assertTest(model.rawText == junk, "Junk is never rewritten to a quoted string")
+    
+    // A word the user is still typing must not be rewritten either.
+    let typing = FakeTextSource(text: "hello")
+    model.registerTextSource(typing)
+    model.noteTextSourceEdited(typing)
+    let beforeWord = model.rebuildCount
+    model.markEditedFromEditor(lineCount: 1, characterCount: 5)
+    await waitForRebuild(model, from: beforeWord)
+    assertTest(model.rawText == "hello", "A bare word being typed is left exactly as typed")
+    
+    // The feature that should still work: a Python dict is converted to JSON.
+    let dict = FakeTextSource(text: "{'a': 1, 'b': True}")
+    model.registerTextSource(dict)
+    model.noteTextSourceEdited(dict)
+    let beforeDict = model.rebuildCount
+    model.markEditedFromEditor(lineCount: 1, characterCount: (dict.text as NSString).length)
+    await waitForRebuild(model, from: beforeDict)
+    assertTest(model.rawText.contains("\"a\": 1") && model.rawText.contains("\"b\": true"), "A Python dict is still converted to JSON")
+    model.unregisterTextSource(dict)
+}
+
+// 33. Tab switches preserve editor cursor/scroll state, and clearing resets them.
+do {
+    let model = JSONDocumentModel()
+    model.rawText = "{\n  \"hello\": \"world\"\n}"
+    assertTest(model.lastEditorSelectedRange == nil, "Editor selected range initially nil")
+    assertTest(model.lastEditorScrollOrigin == nil, "Editor scroll origin initially nil")
+    
+    // Simulate setting selection and scroll
+    model.lastEditorSelectedRange = NSRange(location: 4, length: 5)
+    model.lastEditorScrollOrigin = CGPoint(x: 0, y: 120)
+    assertTest(model.lastEditorSelectedRange?.location == 4, "Editor selection preserved")
+    assertTest(model.lastEditorScrollOrigin?.y == 120, "Editor scroll origin preserved")
+    
+    // Switch tabs
+    model.selectTab(.viewer)
+    assertTest(model.activeTab == .viewer, "Active tab is viewer")
+    assertTest(model.lastEditorSelectedRange?.location == 4, "Editor selection survives tab switch to viewer")
+    
+    model.selectTab(.split)
+    assertTest(model.activeTab == .split, "Active tab is split")
+    assertTest(model.lastEditorScrollOrigin?.y == 120, "Editor scroll survives tab switch to split")
+    
+    // Clearing resets the editor cursor and scroll state
+    model.clearText()
+    assertTest(model.lastEditorSelectedRange?.location == 0, "Clearing resets editor cursor to top")
+    assertTest(model.lastEditorScrollOrigin == .zero, "Clearing resets editor scroll to zero")
 }
 
 print("\n-----------------------------------------")

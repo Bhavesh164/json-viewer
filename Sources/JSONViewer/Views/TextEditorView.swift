@@ -319,11 +319,10 @@ struct NativeCodeEditor: NSViewRepresentable {
             .foregroundColor: NSColor.textColor
         ]
         
-        let fullRange = NSRange(location: 0, length: textStorage.length)
-        if fullRange.length > 0 {
-            textStorage.addAttribute(.font, value: font, range: fullRange)
-            textStorage.addAttribute(.foregroundColor, value: NSColor.textColor, range: fullRange)
-        }
+        // No full-range attribute pass here: assigning `textView.font` and
+        // `textView.textColor` above already applies them to the whole storage, and
+        // doing it again cost 18.5 ms on a 24 MB document every time a text tab was
+        // opened.
         
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -345,6 +344,15 @@ struct NativeCodeEditor: NSViewRepresentable {
         model.registerTextSource(context.coordinator)
         
         scrollView.documentView = textView
+        
+        if let savedRange = model.lastEditorSelectedRange, savedRange.location <= textStorage.length {
+            let len = min(savedRange.length, textStorage.length - savedRange.location)
+            textView.setSelectedRange(NSRange(location: savedRange.location, length: len))
+        }
+        if let savedOrigin = model.lastEditorScrollOrigin {
+            scrollView.contentView.scroll(to: savedOrigin)
+        }
+        
         return scrollView
     }
     
@@ -386,7 +394,16 @@ struct NativeCodeEditor: NSViewRepresentable {
             return
         }
         
-        // 4. Ultra-fast length check directly on NSTextStorage without copying full strings
+        // 4. Nothing new to hand over. The buffer can only change by an editor edit
+        //    (which sets hasPendingTextSync) or by the replace below, which records the
+        //    revision it wrote. So if the model has not assigned new text since then,
+        //    the buffer already is the model's text — and checking that is what keeps a
+        //    full-document string comparison off the update path.
+        if context.coordinator.handledModelRevision == model.modelTextRevision {
+            return
+        }
+        
+        // 5. Ultra-fast length check directly on NSTextStorage without copying full strings
         let currentLength = textStorage.length
         let text = model.rawText
         let nsNewText = text as NSString
@@ -423,13 +440,16 @@ struct NativeCodeEditor: NSViewRepresentable {
             }
             
             // The buffer was replaced wholesale: re-anchor the incremental line count,
-            // which is maintained edit by edit and is now meaningless.
+            // which is maintained edit by edit and is now meaningless, and record
+            // which model text the buffer now holds.
             context.coordinator.adoptDocument(textStorage: textStorage, text: text)
         }
     }
     
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         if let textView = nsView.documentView as? NSTextView {
+            coordinator.parent.model.lastEditorSelectedRange = textView.selectedRange()
+            coordinator.parent.model.lastEditorScrollOrigin = nsView.contentView.bounds.origin
             textView.delegate = nil
         }
         // Unregistering flushes any edit that has not reached the model yet, so leaving
@@ -478,10 +498,14 @@ struct NativeCodeEditor: NSViewRepresentable {
         
         /// Start tracking a buffer that was filled by the model rather than by typing.
         func adoptDocument(textStorage: NSTextStorage, text: String) {
-            trackedLineCount = JSONDocumentModel.lineCount(of: text)
+            trackedLineCount = (text == model.rawText) ? model.lineCount : JSONDocumentModel.lineCount(of: text)
             expectedLength = textStorage.length
             reanchorCooldown = 0
+            handledModelRevision = model.modelTextRevision
         }
+        
+        /// The model text revision this buffer currently holds.
+        var handledModelRevision: Int = -1
         
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView,
