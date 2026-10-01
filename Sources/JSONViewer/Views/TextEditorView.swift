@@ -239,6 +239,22 @@ public struct TextEditorView: View {
 
 // Custom NSTextView that automatically converts pasted Python dictionaries/literals to valid JSON
 final class EditorTextView: NSTextView {
+    override init(frame frameRect: NSRect, textContainer: NSTextContainer?) {
+        super.init(frame: frameRect, textContainer: textContainer)
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+    
+    convenience override init(frame frameRect: NSRect) {
+        self.init(frame: frameRect, textContainer: nil)
+    }
+    
+    convenience init() {
+        self.init(frame: .zero, textContainer: nil)
+    }
+    
     override func paste(_ sender: Any?) {
         if let pbString = NSPasteboard.general.string(forType: .string) {
             let trimmed = pbString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -267,12 +283,48 @@ struct NativeCodeEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.borderType = .noBorder
+        scrollView.autohidesScrollers = true
         
-        let textView = EditorTextView()
-        textView.autoresizingMask = [.width]
-        textView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        // Explicitly build the TextKit 1 stack with NSTextStorage and NSLayoutManager.
+        // This is the proven, highest-performance configuration for large documents in AppKit,
+        // ensuring non-contiguous layout and idle background layout actually take effect.
+        let textStorage = NSTextStorage(string: text)
+        let layoutManager = NSLayoutManager()
+        layoutManager.allowsNonContiguousLayout = true
+        layoutManager.backgroundLayoutEnabled = true
+        textStorage.addLayoutManager(layoutManager)
+        
+        let contentSize = scrollView.contentSize
+        let textContainer = NSTextContainer(containerSize: NSSize(
+            width: wrapLines ? contentSize.width : CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        ))
+        textContainer.widthTracksTextView = wrapLines
+        textContainer.lineFragmentPadding = 8
+        layoutManager.addTextContainer(textContainer)
+        
+        let textView = EditorTextView(frame: NSRect(origin: .zero, size: contentSize), textContainer: textContainer)
+        textView.minSize = NSSize(width: 0.0, height: contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = !wrapLines
+        textView.autoresizingMask = wrapLines ? [.width] : []
+        
+        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        textView.font = font
         textView.backgroundColor = NSColor.textBackgroundColor
         textView.textColor = NSColor.textColor
+        textView.typingAttributes = [
+            .font: font,
+            .foregroundColor: NSColor.textColor
+        ]
+        
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        if fullRange.length > 0 {
+            textStorage.addAttribute(.font, value: font, range: fullRange)
+            textStorage.addAttribute(.foregroundColor, value: NSColor.textColor, range: fullRange)
+        }
+        
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -281,70 +333,101 @@ struct NativeCodeEditor: NSViewRepresentable {
         textView.isGrammarCheckingEnabled = false
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false
+        textView.isAutomaticTextCompletionEnabled = false
         textView.smartInsertDeleteEnabled = false
         textView.allowsUndo = true
         textView.isRichText = false
+        textView.allowsDocumentBackgroundColorChange = false
         
-        if wrapLines {
-            textView.isHorizontallyResizable = false
-            textView.textContainer?.widthTracksTextView = true
-        } else {
-            textView.isHorizontallyResizable = true
-            textView.textContainer?.widthTracksTextView = false
-            textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        }
-        
-        // Critical for performance: only lay out visible text lines instead of calculating millions of glyphs
-        textView.layoutManager?.allowsNonContiguousLayout = true
-        
-        textView.string = text
         textView.delegate = context.coordinator
-        
-        textView.textContainer?.lineFragmentPadding = 8
-        
-        scrollView.documentView = textView
         context.coordinator.textView = textView
         
+        scrollView.documentView = textView
         return scrollView
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        guard let textView = nsView.documentView as? NSTextView else { return }
+        guard let textView = nsView.documentView as? EditorTextView,
+              let textStorage = textView.textStorage else { return }
         
+        // 1. Update font size if changed
         if textView.font?.pointSize != fontSize {
-            textView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            let newFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            textView.font = newFont
+            textView.typingAttributes[.font] = newFont
+            if textStorage.length > 0 {
+                textStorage.addAttribute(.font, value: newFont, range: NSRange(location: 0, length: textStorage.length))
+            }
         }
         
+        // 2. Update line wrapping if changed
         let isCurrentlyWrapping = textView.textContainer?.widthTracksTextView == true
         if isCurrentlyWrapping != wrapLines {
             textView.isHorizontallyResizable = !wrapLines
             textView.textContainer?.widthTracksTextView = wrapLines
-            if !wrapLines {
+            if wrapLines {
+                textView.autoresizingMask = [.width]
+                textView.textContainer?.containerSize = NSSize(width: nsView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+            } else {
+                textView.autoresizingMask = []
                 textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
             }
+            textView.needsLayout = true
         }
         
-        // If the update was triggered by the user typing directly in this textView, skip immediately!
-        // This eliminates redundant string comparisons and avoids resetting the undo manager while typing.
+        // 3. Skip update if triggered from this text view's own typing
         if context.coordinator.isUpdatingFromTextView {
             return
         }
         
-        // Fast integer length check before performing an expensive full-string comparison
-        let currentLength = (textView.string as NSString).length
-        let newLength = (text as NSString).length
-        if currentLength != newLength || textView.string != text {
+        // 4. Ultra-fast length check directly on NSTextStorage without copying full strings
+        let currentLength = textStorage.length
+        let nsNewText = text as NSString
+        let newLength = nsNewText.length
+        
+        if currentLength != newLength || textStorage.string != text {
             let selectedRanges = textView.selectedRanges
             textView.undoManager?.removeAllActions()
-            textView.string = text
-            textView.selectedRanges = selectedRanges
+            
+            // Batch edits in NSTextStorage to avoid expensive repeated layout passes
+            textStorage.beginEditing()
+            textStorage.replaceCharacters(in: NSRange(location: 0, length: currentLength), with: text)
+            
+            let updatedRange = NSRange(location: 0, length: textStorage.length)
+            if updatedRange.length > 0 {
+                let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+                textStorage.addAttribute(.font, value: font, range: updatedRange)
+                textStorage.addAttribute(.foregroundColor, value: NSColor.textColor, range: updatedRange)
+            }
+            textStorage.endEditing()
+            
+            // Restore selection clamped to valid textStorage length
+            let maxLen = textStorage.length
+            let validRanges = selectedRanges.compactMap { val -> NSValue? in
+                let r = val.rangeValue
+                if r.location <= maxLen {
+                    let len = min(r.length, maxLen - r.location)
+                    return NSValue(range: NSRange(location: r.location, length: len))
+                }
+                return nil
+            }
+            if !validRanges.isEmpty {
+                textView.selectedRanges = validRanges
+            }
         }
+    }
+    
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        if let textView = nsView.documentView as? NSTextView {
+            textView.delegate = nil
+        }
+        coordinator.textView = nil
     }
     
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeCodeEditor
-        weak var textView: NSTextView?
+        weak var textView: EditorTextView?
         var isUpdatingFromTextView: Bool = false
         
         init(_ parent: NativeCodeEditor) {
@@ -358,6 +441,13 @@ struct NativeCodeEditor: NSViewRepresentable {
             // Clear flag asynchronously after SwiftUI finishes this update cycle
             DispatchQueue.main.async { [weak self] in
                 self?.isUpdatingFromTextView = false
+            }
+        }
+        
+        func textDidEndEditing(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            if parent.text != tv.string {
+                parent.text = tv.string
             }
         }
     }
