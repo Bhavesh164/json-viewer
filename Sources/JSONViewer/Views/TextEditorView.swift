@@ -186,7 +186,7 @@ public struct TextEditorView: View {
                             .foregroundColor(.secondary.opacity(0.6))
                             // NSTextView draws its insertion point at the text
                             // container inset; keep the placeholder on that origin.
-                            .padding(.leading, 5)
+                            .padding(.leading, 9)
                             .padding(.top, 0)
                             .allowsHitTesting(false)
                     }
