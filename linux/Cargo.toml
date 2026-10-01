@@ -21,6 +21,11 @@ path = "src/lib.rs"
 name = "jsonviewer"
 path = "src/main.rs"
 
+[[bench]]
+name = "text_tab"
+path = "benches/text_tab.rs"
+harness = false
+
 [profile.release]
 lto = true
 strip = true
