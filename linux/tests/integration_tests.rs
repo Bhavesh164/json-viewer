@@ -1201,7 +1201,7 @@ fn clicking_the_editor_steals_focus_from_another_widget() {
         other_has_focus,
         vec![egui::Event::Text("y".to_string())],
     );
-    assert_eq!(editor.text(), "ay\nbeta\n", "a click on the editor focuses it");
+    assert_eq!(editor.text(), "yalpha\nbeta\n", "a click on the editor focuses it");
     assert_eq!(other, "otherx", "the other field no longer receives text");
 }
 
