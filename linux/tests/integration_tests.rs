@@ -918,14 +918,18 @@ fn editing_navigation_and_undo_redo() {
     editor.redo();
     assert_eq!(editor.text(), "one\ntwo\nX\n");
 
+    // Backspace with the caret after "X" removes the character.
+    frame(&ctx, &mut editor, vec![key(egui::Key::Backspace)]);
+    assert_eq!(editor.text(), "one\ntwo\n\n");
+    editor.undo();
+    assert_eq!(editor.text(), "one\ntwo\nX\n");
+
     // Backspace at the start of a line joins it to the previous line.
-    let _ = ctx.run(editor_raw(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            editor.show(ui, egui::FontId::monospace(13.0));
-        });
-    });
+    frame(&ctx, &mut editor, vec![key(egui::Key::Home)]);
+    assert_eq!(editor.cursor(), Cursor { line: 2, col: 0 });
     frame(&ctx, &mut editor, vec![key(egui::Key::Backspace)]);
     assert_eq!(editor.text(), "one\ntwoX\n");
+    assert_eq!(editor.cursor(), Cursor { line: 1, col: 3 });
     editor.undo();
     assert_eq!(editor.text(), "one\ntwo\nX\n");
 }
@@ -1065,4 +1069,172 @@ fn text_tab_and_split_tab_render_heavy_documents() {
         let ms = start.elapsed().as_secs_f64() * 1000.0 / 5.0;
         assert!(ms < 16.0, "{tab:?} tab frame on a ~1 MB document: {ms:.2} ms");
     }
+}
+
+/// A real click: press and release the primary button at `pos`, then keep the
+/// pointer still so egui reports a click rather than a drag.
+fn click(ctx: &egui::Context, editor: &mut CodeEditor, pos: egui::Pos2) {
+    let mut press = editor_raw();
+    press.events.push(egui::Event::PointerMoved(pos));
+    press.events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    });
+    let _ = ctx.run(press, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, egui::FontId::monospace(13.0));
+        });
+    });
+
+    let mut release = editor_raw();
+    release.events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    let _ = ctx.run(release, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, egui::FontId::monospace(13.0));
+        });
+    });
+}
+
+#[test]
+fn clicking_the_editor_takes_focus_and_allows_typing() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut editor = CodeEditor::new("alpha\nbeta\ngamma\n");
+
+    // Without a click or an explicit focus request there is nothing focused, so
+    // the editor grabs the keyboard on its own.
+    let _ = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, egui::FontId::monospace(13.0));
+        });
+    });
+    frame(&ctx, &mut editor, vec![egui::Event::Text("Z".to_string())]);
+    assert_eq!(editor.text(), "Zalpha\nbeta\ngamma\n");
+
+    // Click on the third row, which must move the caret and keep focus.
+    click(&ctx, &mut editor, egui::pos2(40.0, 3.0 * 20.0 + 10.0));
+    assert_eq!(editor.cursor(), Cursor { line: 3, col: 0 });
+
+    frame(&ctx, &mut editor, vec![egui::Event::Text("hi".to_string())]);
+    assert_eq!(editor.text(), "Zalpha\nbeta\ngamma\nhi");
+}
+
+#[test]
+fn clicking_the_editor_steals_focus_from_another_widget() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut editor = CodeEditor::new("alpha\nbeta\n");
+    let mut other = String::from("other");
+    let mut other_has_focus = true;
+
+    // Draw the editor plus a `TextEdit`. The `TextEdit` asks for focus only
+    // while `other_has_focus` is set, exactly like the app's Find field, so
+    // only an explicit click on the editor can move focus across.
+    fn draw(
+        editor: &mut CodeEditor,
+        other: &mut String,
+        other_has_focus: bool,
+        ui: &mut egui::Ui,
+    ) {
+        editor.show(ui, egui::FontId::monospace(13.0));
+        let resp = ui.add(egui::TextEdit::singleline(other));
+        if other_has_focus {
+            resp.request_focus();
+        }
+    }
+
+    let run = |ctx: &egui::Context,
+               editor: &mut CodeEditor,
+               other: &mut String,
+               other_has_focus: bool,
+               events: Vec<egui::Event>| {
+        let mut raw = editor_raw();
+        raw.events = events;
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw(editor, other, other_has_focus, ui)
+            });
+        });
+    };
+
+    // Let the `TextEdit` take the keyboard.
+    run(&ctx, &mut editor, &mut other, other_has_focus, Vec::new());
+    run(&ctx, &mut editor, &mut other, other_has_focus, Vec::new());
+    other_has_focus = false;
+
+    // Typing now must go to the other field, not into the document.
+    run(
+        &ctx,
+        &mut editor,
+        &mut other,
+        other_has_focus,
+        vec![egui::Event::Text("x".to_string())],
+    );
+    assert_eq!(other, "otherx", "the focused TextEdit keeps the keyboard");
+    assert_eq!(editor.text(), "alpha\nbeta\n", "editor does not steal focus");
+
+    // Clicking inside the editor must hand the keyboard over to it. Click near
+    // the start of the first row so the caret lands at 0:0.
+    let click_at = egui::pos2(0.0, 5.0);
+    for pressed in [true, false] {
+        let mut raw = editor_raw();
+        raw.events.push(egui::Event::PointerMoved(click_at));
+        raw.events.push(egui::Event::PointerButton {
+            pos: click_at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+        run(&ctx, &mut editor, &mut other, other_has_focus, raw.events);
+    }
+    run(
+        &ctx,
+        &mut editor,
+        &mut other,
+        other_has_focus,
+        vec![egui::Event::Text("y".to_string())],
+    );
+    assert_eq!(editor.text(), "ay\nbeta\n", "a click on the editor focuses it");
+    assert_eq!(other, "otherx", "the other field no longer receives text");
+}
+
+#[test]
+fn search_box_keeps_focus_when_the_editor_is_also_shown() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut app = ViewerApp::new(Settings::default(), None);
+    app.doc.raw_text = "alpha\nbeta\n".to_string();
+    app.editor.set_text(&app.doc.raw_text);
+
+    // One frame to hand focus to the Find field. The editor is on screen in the
+    // same pass and runs first, so it must not take focus back.
+    app.focus_search = true;
+    let _ = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.editor.show(ui, egui::FontId::monospace(13.0));
+            app.show_search_toolbar(ui);
+        });
+    });
+
+    let mut raw = editor_raw();
+    raw.events.push(egui::Event::Text("needle".to_string()));
+    let _ = ctx.run(raw, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.editor.show(ui, egui::FontId::monospace(13.0));
+            app.show_search_toolbar(ui);
+        });
+    });
+    assert_eq!(app.search_input, "needle", "the Find field receives the typing");
+    assert_eq!(
+        app.editor.text(),
+        "alpha\nbeta\n",
+        "the editor must not swallow text meant for the Find field"
+    );
 }

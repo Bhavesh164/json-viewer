@@ -808,6 +808,12 @@ impl CodeEditor {
         if self.focus_request {
             ui.memory_mut(|m| m.request_focus(id));
             self.focus_request = false;
+        } else if ui.memory(|m| m.focused()).is_none() {
+            // Nothing else wants the keyboard, so take it. Without this, typing
+            // in the Text or Split tab is dropped until the user clicks first.
+            // Any other widget that asks for focus later in the same pass wins,
+            // because `request_focus` simply overwrites.
+            ui.memory_mut(|m| m.request_focus(id));
         }
 
         let char_w = ui.fonts(|f| f.glyph_width(&font, '0')).max(1.0);
@@ -847,7 +853,7 @@ impl CodeEditor {
             };
 
             let response = ui.interact(viewport, id, Sense::click_and_drag());
-            self.handle_pointer(ui, response, &m);
+            self.handle_pointer(ui, response, &m, id);
             if ui.memory(|mem| mem.has_focus(id)) {
                 self.handle_keys(ui);
                 // Selection geometry depends on the caret, so paint afterwards.
@@ -894,9 +900,12 @@ impl CodeEditor {
         self.buffer.clamp(Cursor { line, col })
     }
 
-    fn handle_pointer(&mut self, ui: &mut egui::Ui, response: egui::Response, m: &Metrics) {
+    fn handle_pointer(&mut self, ui: &mut egui::Ui, response: egui::Response, m: &Metrics, id: egui::Id) {
         let primary = egui::PointerButton::Primary;
         if response.clicked_by(primary) {
+            // Take keyboard focus, otherwise typing is dropped because
+            // `handle_keys` only runs for the focused widget.
+            ui.memory_mut(|mem| mem.request_focus(id));
             let pos = response.interact_pointer_pos().unwrap_or(m.viewport.center());
             let c = self.cursor_at(m, pos);
             let now = ui.input(|i| i.time);
@@ -905,7 +914,7 @@ impl CodeEditor {
                 .filter(|(t, line)| now - *t < TRIPLE_CLICK_SECONDS && *line == c.line);
             self.last_click = Some((now, c.line));
             self.group += 1;
-            if let Some(_) = line_click {
+            if line_click.is_some() {
                 self.select_line(c);
             } else if ui.input(|i| i.pointer.button_double_clicked(primary)) {
                 self.select_word(c);
@@ -918,6 +927,7 @@ impl CodeEditor {
             self.restart_blink();
         } else if response.dragged_by(primary) {
             if let Some(origin) = self.drag_origin {
+                ui.memory_mut(|mem| mem.request_focus(id));
                 let pos = response.interact_pointer_pos().unwrap_or(m.viewport.center());
                 self.cursor = self.cursor_at(m, pos);
                 self.anchor = origin;
