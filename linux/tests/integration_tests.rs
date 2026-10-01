@@ -1238,3 +1238,83 @@ fn search_box_keeps_focus_when_the_editor_is_also_shown() {
         "the editor must not swallow text meant for the Find field"
     );
 }
+
+#[test]
+fn typing_in_the_text_tab_updates_the_document() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut app = ViewerApp::new(Settings::default(), None);
+    app.doc.raw_text = "{\n  \"a\": 1\n}\n".to_string();
+    app.doc.update_metrics();
+    app.doc.active_tab = AppTab::Text;
+    app.last_tab = AppTab::Text;
+    app.editor.set_text(&app.doc.raw_text);
+
+    let mut draw = |app: &mut ViewerApp, ui: &mut egui::Ui| {
+        app.show_text_toolbar(&ctx, ui);
+        ui.separator();
+        app.editor.show(ui, egui::FontId::monospace(13.0));
+    };
+
+    // Settle, then type on the first row.
+    let _ = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+    });
+    let mut raw = editor_raw();
+    raw.events.push(egui::Event::Text("9".to_string()));
+    let _ = ctx.run(raw, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+    });
+
+    assert_eq!(
+        app.doc.raw_text, "9{\n  \"a\": 1\n}\n",
+        "the keystroke reaches doc.raw_text through the Text tab"
+    );
+    assert!(app.pending_reparse, "editing schedules the debounced re-parse");
+    assert!(app.doc.is_dirty);
+
+    // And the document the tree is built from parses.
+    let s = app.settings.clone();
+    assert!(app.doc.parse_and_build_tree(true, &s));
+    assert!(app.doc.parse_error.is_none());
+}
+
+#[test]
+fn typing_in_the_split_tab_updates_the_both_editors() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut app = ViewerApp::new(Settings::default(), None);
+    app.doc.raw_text = "{\n  \"a\": 1\n}\n".to_string();
+    app.doc.active_tab = AppTab::Split;
+    app.last_tab = AppTab::Split;
+    app.split_editor.set_text(&app.doc.raw_text);
+    app.editor.set_text(&app.doc.raw_text);
+
+    let mut draw = |app: &mut ViewerApp, ui: &mut egui::Ui| {
+        ui.columns(2, |cols| {
+            app.split_editor.show(&mut cols[0], egui::FontId::monospace(13.0));
+            app.show_tree_view(&ctx, &mut cols[1]);
+        });
+    };
+
+    let _ = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+    });
+    let mut raw = editor_raw();
+    raw.events.push(egui::Event::Text("7".to_string()));
+    let _ = ctx.run(raw, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+    });
+
+    assert_eq!(app.doc.raw_text, "7{\n  \"a\": 1\n}\n");
+    assert_eq!(
+        app.split_editor.text(),
+        app.doc.raw_text,
+        "the split editor is the source"
+    );
+    assert_eq!(
+        app.editor.text(),
+        app.doc.raw_text,
+        "the Text tab editor mirrors the split editor"
+    );
+}
