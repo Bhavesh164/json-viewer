@@ -184,8 +184,10 @@ public struct TextEditorView: View {
                         Text("Paste the JSON code here (your code is not saved anywhere)")
                             .font(.system(size: model.fontSize, design: .monospaced))
                             .foregroundColor(.secondary.opacity(0.6))
-                            .padding(.leading, 12)
-                            .padding(.top, 10)
+                            // Match NSTextView's text origin: its default 5 pt
+                            // container inset plus the 8 pt line fragment padding.
+                            .padding(.leading, 13)
+                            .padding(.top, 5)
                             .allowsHitTesting(false)
                     }
                 }
