@@ -388,7 +388,10 @@ impl DocumentModel {
         } else {
             self.character_count = self.raw_text.encode_utf16().count();
         }
-        self.line_count = 1 + self.raw_text.bytes().filter(|&b| b == b'\n').count();
+        // `split` is memchr-backed. A plain `bytes().filter(..).count()` walks the
+        // document one byte at a time, which is several milliseconds on every
+        // keystroke in a multi-megabyte file.
+        self.line_count = self.raw_text.split('\n').count();
     }
 
     pub fn mark_edited(&mut self) {
@@ -405,8 +408,15 @@ impl DocumentModel {
         let previous_expanded_leaf = self.expanded_leaf_nodes.clone();
         let trimmed = self.raw_text.trim();
         if trimmed.is_empty() {
+            // An empty document cannot correspond to any tree, so there is
+            // nothing worth keeping stale: drop the last good tree, the error
+            // left over from an earlier invalid state, and the search results
+            // that pointed into it. (A non-empty but invalid document still
+            // keeps its last good tree, flagged out of date.)
+            self.discard_tree();
             if !silent {
-                self.error_message = "JSON error: Please enter JSON code in the Text tab first.".to_string();
+                self.error_message =
+                    "JSON error: Please enter JSON code in the Text tab first.".to_string();
             }
             return false;
         }
@@ -687,17 +697,25 @@ impl DocumentModel {
         self.tree_navigation_request += 1;
     }
 
-    pub fn clear(&mut self) {
-        self.raw_text.clear();
+    /// Drop the parsed document and everything derived from it, leaving the
+    /// text itself untouched. Used when the text can no longer produce a tree.
+    pub fn discard_tree(&mut self) {
         self.json_value = None;
         self.root = None;
         self.selected_id = None;
         self.requested_scroll_id = None;
         self.parse_error = None;
+        self.error_message.clear();
         self.clear_search();
         self.expanded_nodes.clear();
         self.expanded_leaf_nodes.clear();
         self.visible_tree_rows.clear();
+        self.tree_version += 1;
+    }
+
+    pub fn clear(&mut self) {
+        self.raw_text.clear();
+        self.discard_tree();
         self.update_metrics();
         self.is_dirty = false;
     }

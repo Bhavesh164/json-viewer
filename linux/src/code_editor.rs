@@ -34,11 +34,42 @@ const TAB_COLUMNS: usize = 4;
 /// Horizontal padding inside the editor, in points.
 const PAD_X: f32 = 6.0;
 
+/// Horizontal padding inside the editor, in points.
+///
+/// Exposed so tests can predict where the caret must land.
+pub const HORIZONTAL_PADDING: f32 = PAD_X;
+
 /// Seconds for one half of the cursor blink cycle.
 const BLINK_PERIOD: f32 = 0.5;
 
 /// Window in which a second click on the same line counts as a triple click.
 const TRIPLE_CLICK_SECONDS: f64 = 0.4;
+
+/// Cell metrics that match what egui actually uses when it paints a line.
+///
+/// epaint does **not** advance by the raw glyph advance: while laying out a
+/// paragraph it adds `glyph_info.advance_width` and then snaps the running x to
+/// a whole pixel after every character, and it snaps the row height the same way
+/// (`epaint::text::text_layout::layout_section` and `galley_from_rows`). So the
+/// effective cell is wider than `glyph_width` reports, and a row is taller than
+/// `row_height` reports. The editor positions the caret with its own arithmetic,
+/// so it has to use the same rounded numbers; otherwise the caret drifts left of
+/// the character and, down the viewport, away from its own line.
+fn cell_metrics(ui: &egui::Ui, font: &FontId) -> (f32, f32) {
+    let ppu = ui.ctx().pixels_per_point().max(0.01);
+    let round = |x: f32| (x * ppu).round() / ppu;
+    let raw = ui.fonts(|f| f.glyph_width(font, '0'));
+    let row_h = round(ui.fonts(|f| f.row_height(font)));
+
+    // Average the pixel-snapped advance over a short run so the per-column
+    // error stays far below one pixel across any realistic line length.
+    const PROBE: usize = 8;
+    let mut x = 0.0;
+    for _ in 0..PROBE {
+        x = round(x + raw);
+    }
+    ((x / PROBE as f32).max(1.0), row_h.max(1.0))
+}
 
 /// Number of columns a character occupies in a monospaced grid. CJK and emoji
 /// are double width, matching terminals and `NSTextView`.
@@ -320,52 +351,85 @@ impl TextBuffer {
 
     /// Replace the text between two cursors, returning the removed text and the
     /// cursor that ends up just after the inserted text.
+    ///
+    /// Only the line index is updated, never the document text, so a keystroke
+    /// in a multi-megabyte file costs a pass over the index rather than a pass
+    /// over the bytes.
     pub fn replace(&mut self, range: Range<Cursor>, insert: &str) -> (String, Cursor) {
-        // Anchor the rescan on the start of the first affected line. An edit
-        // beginning on that line never moves the line's own start offset, so
-        // the value read before the splice stays valid afterwards.
         let first_line = self.clamp(range.start).line;
-        let start_of_line = self.line_starts[first_line];
         let a = self.byte_of(range.start);
         let b = self.byte_of(range.end).max(a);
         let removed = self.text[a..b].to_string();
+        // Each newline inside the replaced span destroys one line start.
+        let removed_lines = self.text[a..b].bytes().filter(|&c| c == b'\n').count();
         self.text.replace_range(a..b, insert);
-        self.reindex_from(first_line, start_of_line);
+        self.version += 1;
+        self.splice_index(first_line, a, b, insert, removed_lines);
         let end = self.cursor_of(a + insert.len());
         (removed, end)
     }
 
-    /// Rebuild the line index for `line` and everything after it.
+    /// Update the line index for a splice, touching only `line` and later.
     ///
-    /// `start_byte` must be the byte offset where `line` begins.
-    fn reindex_from(&mut self, line: usize, start_byte: usize) {
-        self.version += 1;
-        let tail = scan(&self.text[start_byte..]);
-        self.simple = tail.simple;
-
-        let mut starts = tail.line_starts;
-        for s in &mut starts {
-            *s += start_byte;
+    /// Line starts before `line` are unaffected, and every start after the
+    /// replaced span simply moves by the length delta. So the work is one shift
+    /// over the index instead of re-scanning the text, which is what makes
+    /// typing in a large file cheap.
+    fn splice_index(
+        &mut self,
+        line: usize,
+        a: usize,
+        b: usize,
+        insert: &str,
+        removed_lines: usize,
+    ) {
+        let delta = insert.len() as isize - (b - a) as isize;
+        // Everything from `line` onwards is rebuilt: the `removed_lines` line
+        // starts destroyed by the replaced newlines are dropped, the ones the
+        // inserted newlines create are pushed, and the survivors just move.
+        let mut survivors: Vec<usize> = self
+            .line_starts
+            .drain(line + 1..)
+            .skip(removed_lines)
+            .collect();
+        for s in &mut survivors {
+            *s = (*s as isize + delta) as usize;
         }
-        self.line_starts.truncate(line);
-        self.line_starts.extend(starts);
 
-        if self.max_line >= line {
-            // The previous widest line was inside the region we just rescanned,
-            // so the surviving prefix needs a pass to find a new maximum.
-            self.max_cols = 0;
-            self.max_line = line;
-            for l in 0..line {
-                let c = self.line_cols(l);
-                if c > self.max_cols {
-                    self.max_cols = c;
-                    self.max_line = l;
-                }
+        // One line start per newline inside the inserted text.
+        let mut off = a;
+        for part in insert.split('\n').skip(1) {
+            off += part.len() + 1;
+            self.line_starts.push(off);
+        }
+        self.line_starts.extend(survivors);
+
+        // `simple` (and therefore `max_cols`) can only change because of the
+        // bytes in the splice itself, so re-derive them from the whole text when
+        // that is cheap and otherwise track the widest line monotonically.
+        if insert.is_ascii() && !insert.contains('\t') {
+            let grew = self.line_cols(line);
+            if grew > self.max_cols {
+                self.max_cols = grew;
+                self.max_line = line;
             }
+        } else {
+            self.simple = self.text.is_ascii() && !self.text.as_bytes().contains(&b'\t');
+            self.recompute_widest();
         }
-        if tail.max_cols > self.max_cols {
-            self.max_cols = tail.max_cols;
-            self.max_line = line + tail.max_line;
+    }
+
+    /// Find the widest line by walking the index (one pass, no text scan when
+    /// the buffer is simple).
+    fn recompute_widest(&mut self) {
+        self.max_cols = 0;
+        self.max_line = 0;
+        for line in 0..self.line_starts.len() {
+            let cols = self.line_cols(line);
+            if cols > self.max_cols {
+                self.max_cols = cols;
+                self.max_line = line;
+            }
         }
     }
 
@@ -816,8 +880,7 @@ impl CodeEditor {
             ui.memory_mut(|m| m.request_focus(id));
         }
 
-        let char_w = ui.fonts(|f| f.glyph_width(&font, '0')).max(1.0);
-        let row_h = ui.fonts(|f| f.row_height(&font)).max(8.0);
+        let (char_w, row_h) = cell_metrics(ui, &font);
         let available = ui.available_size();
         let viewport_size = Vec2::new(available.x.max(64.0), available.y.max(64.0));
         self.viewport_rows = (viewport_size.y / row_h).floor().max(1.0) as usize;

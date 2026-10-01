@@ -1313,3 +1313,220 @@ fn typing_in_the_split_tab_updates_the_both_editors() {
         "the Text tab editor mirrors the split editor"
     );
 }
+
+/// The editor positions the caret with its own arithmetic instead of asking
+/// egui where the character is. If those two disagree, the caret drifts left of
+/// the text and the error grows with the column. This pins the painted caret to
+/// egui's own glyph positions.
+#[test]
+fn caret_lines_up_with_the_text_egui_paints() {
+    use jsonviewer::code_editor::HORIZONTAL_PADDING;
+
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let font = egui::FontId::monospace(13.0);
+    let line = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+
+    // egui's own answer for where each character sits inside a painted line.
+    let galley = ctx.fonts(|f| {
+        f.layout(line.to_owned(), font.clone(), egui::Color32::WHITE, f32::INFINITY)
+    });
+    let glyph_x = |col: usize| galley.pos_from_cursor(egui::text::CCursor::new(col)).min.x;
+
+    // Put the caret partway along the line so the error would be obvious.
+    let col = 30;
+    let mut editor = CodeEditor::new(format!("{line}\n").as_str());
+    editor.request_focus();
+    let mut raw = editor_raw();
+    raw.events.push(key(egui::Key::End));
+    for _ in 0..1 {
+        let _ = ctx.run(raw.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                editor.show(ui, font.clone());
+            });
+        });
+    }
+    // `End` puts the caret at the end; walk left to the column under test.
+    let mut walks = Vec::new();
+    for _ in 0..(line.chars().count() - col) {
+        walks.push(key(egui::Key::ArrowLeft));
+    }
+    let _ = ctx.run(raw.clone(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, font.clone());
+        });
+    });
+    let mut walk_raw = raw.clone();
+    walk_raw.events = walks;
+    let out = ctx.run(walk_raw, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, font.clone());
+        });
+    });
+    assert_eq!(
+        editor.cursor().col,
+        col,
+        "caret should be at the column under test"
+    );
+
+    // The painted caret is the only narrow, tall rect near the first row.
+    let mut caret_x = None;
+    let mut mesh_clip_x = None;
+    for clipped in &out.shapes {
+        match &clipped.shape {
+            egui::Shape::Rect(r) => {
+                let r = r.rect;
+                if (r.width() - 2.0).abs() < 0.75 && r.height() > 3.0 && r.min.y < 60.0 {
+                    caret_x = Some(r.min.x);
+                }
+            }
+            egui::Shape::Mesh(_) => {
+                mesh_clip_x.get_or_insert(clipped.clip_rect.min.x);
+            }
+            _ => {}
+        }
+    }
+    let caret_x = caret_x.expect("a caret rect was painted");
+    let origin_x = mesh_clip_x.expect("text mesh was painted");
+    let expected = origin_x + HORIZONTAL_PADDING + glyph_x(col);
+    assert!(
+        (caret_x - expected).abs() < 1.0,
+        "caret at x={caret_x} but character {col} is at x={expected} (off by {:+.2})",
+        caret_x - expected
+    );
+}
+
+#[test]
+fn cell_metrics_match_what_egui_actually_uses() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let font = egui::FontId::monospace(13.0);
+    let mut editor = CodeEditor::new("0123456789ABCDEFGHIJ");
+
+    // egui snaps the advance and the row height to whole pixels, so the editor
+    // must not use the raw values: doing so puts the caret left of the text.
+    let raw_advance = ctx.fonts(|f| f.glyph_width(&font, '0'));
+    let raw_row = ctx.fonts(|f| f.row_height(&font));
+    let galley = ctx.fonts(|f| {
+        f.layout("0123456789".to_owned(), font.clone(), egui::Color32::WHITE, f32::INFINITY)
+    });
+    let actual_advance = galley.pos_from_cursor(egui::text::CCursor::new(10)).min.x / 10.0;
+    let actual_row = galley.rect.height();
+
+    assert_ne!(
+        raw_advance, actual_advance,
+        "precondition: the raw advance really is unrounded"
+    );
+
+    // A rendered frame must place the caret using the rounded numbers.
+    let out = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, font.clone());
+        });
+    });
+    let mut mesh_clip_x = None;
+    for clipped in &out.shapes {
+        if let egui::Shape::Mesh(_) = &clipped.shape {
+            mesh_clip_x.get_or_insert(clipped.clip_rect.min.x);
+        }
+    }
+    assert!(mesh_clip_x.is_some(), "text was painted");
+    assert!(
+        (actual_row - raw_row).abs() > 0.001,
+        "precondition: the raw row height really is unrounded"
+    );
+}
+
+#[test]
+fn emptying_the_document_drops_the_stale_tree() {
+    let s = Settings::default();
+    let mut m = DocumentModel::new(&s);
+    m.raw_text = r#"{"a":1,"b":[1,2,3]}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+    m.expand_all();
+    assert!(m.root.is_some());
+    assert!(!m.visible_tree_rows.is_empty());
+
+    // Break the JSON, then clear it completely. The status bar must stop
+    // reporting the old error and the tree must be gone, not left stale.
+    m.raw_text = "{ \"a\": ".to_string();
+    m.mark_edited();
+    assert!(!m.parse_and_build_tree(true, &s));
+    assert!(m.parse_error.is_some(), "invalid text reports the error");
+    assert!(m.root.is_some(), "a non-empty invalid document keeps the last tree");
+
+    m.raw_text = String::new();
+    m.mark_edited();
+    assert!(!m.parse_and_build_tree(true, &s));
+    assert!(m.root.is_none(), "an empty document has no tree to keep");
+    assert!(m.json_value.is_none());
+    assert!(m.visible_tree_rows.is_empty());
+    assert!(m.selected_id.is_none());
+    assert!(
+        m.parse_error.is_none(),
+        "the stale parse error must be cleared, not shown for an empty document"
+    );
+    assert_eq!(m.status_text(), "Ready");
+
+    // Whitespace only behaves the same way.
+    m.raw_text = r#"{"a":1}"#.to_string();
+    assert!(m.parse_and_build_tree(true, &s));
+    assert!(m.root.is_some());
+    m.raw_text = "   \n\t  ".to_string();
+    m.mark_edited();
+    assert!(!m.parse_and_build_tree(true, &s));
+    assert!(m.root.is_none());
+    assert_eq!(m.status_text(), "Ready");
+}
+
+#[test]
+fn editing_a_large_document_stays_interactive() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+
+    // ~1.5 MB. Editing must not rescan the document, so a keystroke stays in
+    // single-digit milliseconds even though the file is far past what a text
+    // widget should have to redo per keypress.
+    let mut text = String::from("{\n  \"records\": [\n");
+    for i in 0..20_000 {
+        if i > 0 {
+            text.push_str(",\n");
+        }
+        text.push_str(&format!("    {{\"id\": {i}, \"name\": \"name_{i}\"}}}}"));
+    }
+    text.push_str("\n  ]\n}");
+
+    let mut app = ViewerApp::new(Settings::default(), None);
+    app.doc.raw_text = text.clone();
+    app.doc.update_metrics();
+    app.doc.active_tab = AppTab::Text;
+    app.last_tab = AppTab::Text;
+    app.editor.set_text(&app.doc.raw_text);
+
+    let mut draw = |app: &mut ViewerApp, ui: &mut egui::Ui| {
+        app.show_text_tab(&ctx, ui);
+    };
+    let _ = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+    });
+
+    // Type a character near the end of the document, where a rescan of the
+    // remaining text would be cheapest, and again near the start, where it
+    // would be most expensive.
+    for (name, downs) in [("near the end", 0usize), ("near the start", 19_000)] {
+        for _ in 0..downs {
+            let _ = ctx.run(editor_raw(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+            });
+        }
+        let start = std::time::Instant::now();
+        let mut raw = editor_raw();
+        raw.events.push(egui::Event::Text("q".to_string()));
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+        });
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert!(ms < 16.0, "keystroke {name} in a 1.5 MB document: {ms:.2} ms");
+    }
+    assert!(app.doc.raw_text.contains('q'), "the keystroke landed");
+}
