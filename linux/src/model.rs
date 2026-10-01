@@ -388,10 +388,22 @@ impl DocumentModel {
         } else {
             self.character_count = self.raw_text.encode_utf16().count();
         }
-        // `split` is memchr-backed. A plain `bytes().filter(..).count()` walks the
-        // document one byte at a time, which is several milliseconds on every
-        // keystroke in a multi-megabyte file.
-        self.line_count = self.raw_text.split('\n').count();
+        // A plain byte loop beats `split('\n')` here, which is not memchr
+        // accelerated for this pattern. Still O(document), so the editor path
+        // must not call it per keystroke — see `mark_edited_from_editor`.
+        self.line_count = 1 + self.raw_text.as_bytes().iter().filter(|&&b| b == b'\n').count();
+    }
+
+    /// Record an edit that came from the editor, taking the line and character
+    /// counts from the editor's line index.
+    ///
+    /// `update_metrics` rescans the whole document, which costs tens of
+    /// milliseconds on a multi-megabyte file. The editor already knows both
+    /// numbers for free, so the typing path must not rescan.
+    pub fn mark_edited_from_editor(&mut self, lines: usize, characters: usize) {
+        self.is_dirty = true;
+        self.line_count = lines;
+        self.character_count = characters;
     }
 
     pub fn mark_edited(&mut self) {

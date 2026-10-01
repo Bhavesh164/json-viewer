@@ -36,6 +36,9 @@ pub struct ViewerApp {
     pub toast: Option<(String, Instant)>,
     pub last_edit: Instant,
     pub pending_reparse: bool,
+    /// Set when an editor has changed but its text has not been copied into
+    /// [`Self::doc`] yet. See [`Self::sync_doc_text_from_editor`].
+    pub editor_changed: bool,
     pub focus_search: bool,
     pub initialized: bool,
     pub last_tab: AppTab,
@@ -79,6 +82,7 @@ impl ViewerApp {
             toast: None,
             last_edit: Instant::now(),
             pending_reparse: false,
+            editor_changed: false,
             focus_search: false,
             initialized: false,
             last_tab: initial_tab,
@@ -134,6 +138,9 @@ impl ViewerApp {
     }
 
     pub fn apply_transform(&mut self, kind: &str) {
+        // Transforms parse `doc.raw_text`, so it has to be current first.
+        let tab = self.doc.active_tab;
+        self.sync_doc_text_from_editor(tab);
         let res = match kind {
             "format" => self.doc.beautify(&self.settings),
             "minify" => self.doc.minify(&self.settings),
@@ -179,6 +186,8 @@ impl ViewerApp {
     }
 
     fn save_file_dialog(&mut self) {
+        let tab = self.doc.active_tab;
+        self.sync_doc_text_from_editor(tab);
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("JSON", &["json"])
             .set_file_name("untitled.json")
@@ -433,6 +442,8 @@ impl ViewerApp {
             ui.separator();
 
             // Copy Dropdown with 4 formats
+            let tab = self.doc.active_tab;
+            self.sync_doc_text_from_editor(tab);
             egui::ComboBox::from_id_salt("tree_copy_combo")
                 .selected_text(egui::RichText::new("Copy ▾").size(11.0))
                 .show_ui(ui, |ui| {
@@ -510,6 +521,9 @@ impl ViewerApp {
                 self.paste_from_clipboard();
             }
 
+            // Every `copy_*` helper formats `doc.raw_text`, so bring it current.
+            let tab = self.doc.active_tab;
+            self.sync_doc_text_from_editor(tab);
             egui::ComboBox::from_id_salt("text_copy_combo")
                 .selected_text(egui::RichText::new("Copy ▾").size(11.0))
                 .show_ui(ui, |ui| {
@@ -1244,10 +1258,8 @@ impl ViewerApp {
         // Only the rows intersecting the viewport are shaped each frame, so the
         // cost does not grow with the document.
         if self.editor.show(ui, font) {
-            self.doc.raw_text = self.editor.text().to_string();
-            self.doc.mark_edited();
-            self.last_edit = Instant::now();
-            self.pending_reparse = true;
+            let (l, c) = (self.editor.line_count(), self.editor.char_count());
+            self.note_editor_edit(l, c);
         }
 
         self.flush_debounced_reparse(ctx);
@@ -1265,11 +1277,8 @@ impl ViewerApp {
 
                 let font = egui::FontId::monospace(self.settings.font_size as f32);
                 if self.split_editor.show(left, font) {
-                    self.doc.raw_text = self.split_editor.text().to_string();
-                    self.editor.set_text(self.split_editor.text());
-                    self.doc.mark_edited();
-                    self.last_edit = Instant::now();
-                    self.pending_reparse = true;
+                    let (l, c) = (self.split_editor.line_count(), self.split_editor.char_count());
+                    self.note_editor_edit(l, c);
                 }
             }
 
@@ -1303,14 +1312,70 @@ impl ViewerApp {
         self.flush_debounced_reparse(ctx);
     }
 
-    /// Re-parse the document 350 ms after the last edit, so typing stays smooth.
+    /// Record that an editor changed, without copying its text into the
+    /// document.
+    ///
+    /// The editor owns the text while the user is typing, and copying a
+    /// multi-megabyte string on every keystroke is what made typing in a large
+    /// file feel laggy. The document is only brought up to date in
+    /// [`Self::sync_doc_text_from_editor`], which runs when something actually
+    /// needs the document: a transform, a copy, a save, a tab switch, or the
+    /// debounced re-parse.
+    fn note_editor_edit(&mut self, lines: usize, chars: usize) {
+        self.editor_changed = true;
+        // The editor's line index already knows these; taking them costs
+        // nothing, whereas `DocumentModel::update_metrics` rescans the document.
+        self.doc.mark_edited_from_editor(lines, chars);
+        self.last_edit = Instant::now();
+        self.pending_reparse = true;
+    }
+
+    /// Copy the active editor's text into the document, if it has changed.
+    ///
+    /// `tab` selects the editor that is authoritative, so a tab switch can flush
+    /// the text of the tab being left.
+    pub fn sync_doc_text_from_editor(&mut self, tab: AppTab) {
+        if !self.editor_changed {
+            return;
+        }
+        self.editor_changed = false;
+        let text = match tab {
+            AppTab::Split => self.split_editor.text(),
+            _ => self.editor.text(),
+        };
+        self.doc.raw_text = text.to_string();
+        // No `update_metrics` here: the editor's line index already supplied the
+        // counts in `note_editor_edit`, and rescanning the document would put an
+        // O(document) pass back on the typing path.
+    }
+
+    /// Re-parse the document a moment after the last edit, so typing stays smooth.
     fn flush_debounced_reparse(&mut self, ctx: &egui::Context) {
-        if self.pending_reparse && self.last_edit.elapsed().as_millis() > 350 {
+        if self.pending_reparse && self.last_edit.elapsed().as_millis() > self.reparse_delay_ms() {
+            let tab = self.doc.active_tab;
+            self.sync_doc_text_from_editor(tab);
+            if tab == AppTab::Split {
+                self.editor.set_text(self.split_editor.text());
+            }
             let s = self.settings.clone();
             let _ = self.doc.parse_and_build_tree(true, &s);
             self.pending_reparse = false;
             ctx.request_repaint();
         }
+    }
+
+    /// How long to wait after the last keystroke before rebuilding the tree.
+    ///
+    /// Parsing a multi-megabyte document takes a few hundred milliseconds, and a
+    /// fixed 350 ms delay means someone typing steadily still triggers a rebuild
+    /// between keystrokes. The delay grows with the document so a big file is
+    /// only re-parsed after a real pause.
+    pub fn reparse_delay_ms(&self) -> u128 {
+        const BASE_MS: u128 = 350;
+        let mb = self.doc.character_count as f64 / (1024.0 * 1024.0);
+        // 350 ms up to 1 MB, then +250 ms per MB, capped at 1.5 s.
+        let extra = (mb.max(0.0) * 250.0) as u128;
+        BASE_MS + extra.min(1150)
     }
 }
 
@@ -1690,6 +1755,9 @@ impl eframe::App for ViewerApp {
 
         // Tab synchronization
         if self.last_tab != self.doc.active_tab {
+            // Flush text typed in the tab being left before the next tab reads
+            // `doc.raw_text`, otherwise a quick switch would drop the edit.
+            self.sync_doc_text_from_editor(self.last_tab);
             match self.doc.active_tab {
                 AppTab::Text => self.editor.set_text(&self.doc.raw_text),
                 AppTab::Split => self.split_editor.set_text(&self.doc.raw_text),

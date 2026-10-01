@@ -384,29 +384,41 @@ impl TextBuffer {
         removed_lines: usize,
     ) {
         let delta = insert.len() as isize - (b - a) as isize;
-        // Everything from `line` onwards is rebuilt: the `removed_lines` line
-        // starts destroyed by the replaced newlines are dropped, the ones the
-        // inserted newlines create are pushed, and the survivors just move.
-        let mut survivors: Vec<usize> = self
-            .line_starts
-            .drain(line + 1..)
-            .skip(removed_lines)
-            .collect();
-        for s in &mut survivors {
-            *s = (*s as isize + delta) as usize;
+        let added_lines = insert.bytes().filter(|&c| c == b'\n').count();
+
+        if removed_lines == 0 && added_lines == 0 {
+            // The common case: a typed or deleted run inside one line. The line
+            // count does not change, so only the offsets after `line` move, and
+            // they all move by the same amount. Shifting in place avoids
+            // reallocating the index on every keystroke.
+            if delta != 0 {
+                for s in &mut self.line_starts[line + 1..] {
+                    *s = (*s as isize + delta) as usize;
+                }
+            }
+        } else {
+            // Newlines appeared or disappeared: the line starts from `line`
+            // onwards are rebuilt, dropping the `removed_lines` destroyed by
+            // the replaced span and pushing one per inserted newline.
+            let mut survivors: Vec<usize> = self
+                .line_starts
+                .drain(line + 1..)
+                .skip(removed_lines)
+                .collect();
+            for s in &mut survivors {
+                *s = (*s as isize + delta) as usize;
+            }
+            let mut off = a;
+            for part in insert.split('\n').skip(1) {
+                off += part.len() + 1;
+                self.line_starts.push(off);
+            }
+            self.line_starts.extend(survivors);
         }
 
-        // One line start per newline inside the inserted text.
-        let mut off = a;
-        for part in insert.split('\n').skip(1) {
-            off += part.len() + 1;
-            self.line_starts.push(off);
-        }
-        self.line_starts.extend(survivors);
-
-        // `simple` (and therefore `max_cols`) can only change because of the
-        // bytes in the splice itself, so re-derive them from the whole text when
-        // that is cheap and otherwise track the widest line monotonically.
+        // `simple` and `max_cols` can only change because of the spliced bytes,
+        // so track the widest line monotonically when the splice is plain, and
+        // fall back to a full pass when it is not.
         if insert.is_ascii() && !insert.contains('\t') {
             let grew = self.line_cols(line);
             if grew > self.max_cols {
@@ -551,6 +563,21 @@ impl CodeEditor {
 
     pub fn cursor(&self) -> Cursor {
         self.cursor
+    }
+
+    /// Number of logical lines, O(1) from the line index.
+    pub fn line_count(&self) -> usize {
+        self.buffer.line_count()
+    }
+
+    /// Character count for the status bar, matching the model's convention of
+    /// UTF-16 code units. O(1) for the common ASCII case.
+    pub fn char_count(&self) -> usize {
+        if self.buffer.is_simple() {
+            self.buffer.text().len()
+        } else {
+            self.buffer.text().encode_utf16().count()
+        }
     }
 
     /// Replace the document, e.g. after a file load or a Format / Minify run.
