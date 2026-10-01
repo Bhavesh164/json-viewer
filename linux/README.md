@@ -20,6 +20,7 @@ directory, XDG config path).
 ```
 linux/
 ├── Cargo.toml              # manifest (eframe/egui, rfd, arboard, serde)
+├── install-omarchy.sh      # one-command installer for Omarchy (remove + install)
 ├── src/
 │   ├── main.rs             # entry point (--help, [FILE], eframe window)
 │   ├── app.rs              # egui UI: tree, editor, grid, search, dialogs
@@ -104,6 +105,72 @@ sudo apt install build-essential cargo rustc libwayland-dev libxkbcommon-dev lib
 sudo dnf install gcc cargo rust wayland-devel libxkbcommon-devel mesa-libGL-devel dejavu-sans-fonts
 ```
 
+## Install on Omarchy (One Command)
+
+`install-omarchy.sh` is the fastest way to get JSON Viewer onto an Omarchy
+machine. It removes any previously installed copy, builds the current source,
+installs it, and makes sure it appears in the Omarchy application menu.
+
+```sh
+cd linux
+./install-omarchy.sh
+```
+
+That single command:
+
+1. Stops a running JSON Viewer instance (so the binary can be replaced).
+2. Removes the previous user-level install — `~/.local/bin/jsonviewer`, the
+   `.desktop` entry, and every icon path.
+3. Removes a system-wide install at `/usr/local/bin` and `/usr/share` if one is
+   found, so it cannot shadow the new copy on `$PATH`.
+4. Runs `cargo build --release`.
+5. Installs the binary to `~/.local/bin/jsonviewer`.
+6. Registers the desktop entry and icons via the app's own `--install` mode.
+7. Refreshes the desktop database, icon cache, and the Omarchy menu.
+8. Verifies the result and prints what to run next.
+
+Then open the Omarchy menu with <kbd>Super</kbd>+<kbd>Space</kbd> and search for
+**JSON Viewer**.
+
+### Options
+
+| Flag | Effect |
+| --- | --- |
+| *(none)* | Remove previous install, build release, install (default) |
+| `--no-build` | Skip the build and install the existing `target/release/jsonviewer` |
+| `--run` | Launch the app once installed |
+| `--uninstall` | Remove the installation and exit |
+| `--help` | Show usage |
+
+Examples:
+
+```sh
+# Rebuild and reinstall after editing the source
+./install-omarchy.sh
+
+# Reinstall the current binary without recompiling (fast iteration)
+./install-omarchy.sh --no-build --run
+
+# Remove it completely
+./install-omarchy.sh --uninstall
+```
+
+The script is idempotent — re-running it always removes the old copy first and
+leaves a single clean install, so there is never a stale duplicate in the menu.
+
+> [!NOTE]
+> The `.desktop` entry and icons are written by the app itself
+> (`src/desktop.rs`), which also runs automatically on every launch. The script
+> calls `jsonviewer --install` rather than writing the entry by hand, so the
+> script and the running app can never disagree about the file's contents.
+> Your settings in `~/.config/JSONViewer/config.json` are never touched.
+
+### Manual equivalent
+
+If you prefer not to use the script, `jsonviewer --install` (see
+[below](#4-install-for-current-user-recommended-no-sudo-needed)) registers the
+desktop entry and icons on its own.
+
 ## How to Build & Install Manually
 
 You can build and install either using the provided `Makefile` or standard `cargo` commands:
@@ -159,6 +226,11 @@ Copies the release binary to your `~/.local/bin` (already on `$PATH` in Omarchy 
 cp linux/target/release/jsonviewer ~/.local/bin/jsonviewer
 ~/.local/bin/jsonviewer --install
 ```
+
+> [!TIP]
+> On Omarchy, prefer [`./install-omarchy.sh`](#install-on-omarchy-one-command) —
+> it does the above *and* removes any previous install first, so you never end up
+> with a stale duplicate in the application menu.
 
 ### 5. Install System-wide into `/usr/local/bin` (Requires `sudo`)
 Installs the binary into `/usr/local/bin` and the `.desktop` launcher and icons into system-wide `/usr/share/`:

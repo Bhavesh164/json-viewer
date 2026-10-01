@@ -248,7 +248,7 @@ if [[ $UNINSTALL_ONLY -eq 1 ]]; then
   remove_user_install
   remove_system_install
   refresh_caches
-  printf '\n%JSON Viewer uninstalled.%s\n' "$G" "$N"
+  printf '\n%sJSON Viewer uninstalled.%s\n' "$G" "$N"
   exit 0
 fi
 
