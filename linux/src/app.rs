@@ -1232,6 +1232,86 @@ impl ViewerApp {
             self.show_about = false;
         }
     }
+
+    // MARK: - Text Tab (matching TextEditorView.swift)
+
+    /// Text tab: text toolbar over the virtualized editor.
+    pub fn show_text_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        self.show_text_toolbar(ctx, ui);
+        ui.separator();
+
+        let font = egui::FontId::monospace(self.settings.font_size as f32);
+        // Only the rows intersecting the viewport are shaped each frame, so the
+        // cost does not grow with the document.
+        if self.editor.show(ui, font) {
+            self.doc.raw_text = self.editor.text().to_string();
+            self.doc.mark_edited();
+            self.last_edit = Instant::now();
+            self.pending_reparse = true;
+        }
+
+        self.flush_debounced_reparse(ctx);
+    }
+
+    // MARK: - Split Tab
+
+    /// Split tab: live editor on the left, tree and properties on the right.
+    pub fn show_split_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.columns(2, |cols| {
+            {
+                let left = &mut cols[0];
+                self.show_text_toolbar(ctx, left);
+                left.separator();
+
+                let font = egui::FontId::monospace(self.settings.font_size as f32);
+                if self.split_editor.show(left, font) {
+                    self.doc.raw_text = self.split_editor.text().to_string();
+                    self.editor.set_text(self.split_editor.text());
+                    self.doc.mark_edited();
+                    self.last_edit = Instant::now();
+                    self.pending_reparse = true;
+                }
+            }
+
+            {
+                let right = &mut cols[1];
+                self.show_tree_toolbar(ctx, right);
+                right.separator();
+
+                if self.show_search {
+                    self.show_search_toolbar(right);
+                    right.separator();
+                }
+
+                if self.show_props {
+                    show_two_columns_70_30(right, |tree_ui, props_ui| {
+                        tree_ui.group(|ui| {
+                            ui.set_min_size(ui.available_size());
+                            self.show_tree_view(ctx, ui);
+                        });
+                        props_ui.group(|ui| {
+                            ui.set_min_size(ui.available_size());
+                            self.show_property_grid(ctx, ui);
+                        });
+                    });
+                } else {
+                    self.show_tree_view(ctx, right);
+                }
+            }
+        });
+
+        self.flush_debounced_reparse(ctx);
+    }
+
+    /// Re-parse the document 350 ms after the last edit, so typing stays smooth.
+    fn flush_debounced_reparse(&mut self, ctx: &egui::Context) {
+        if self.pending_reparse && self.last_edit.elapsed().as_millis() > 350 {
+            let s = self.settings.clone();
+            let _ = self.doc.parse_and_build_tree(true, &s);
+            self.pending_reparse = false;
+            ctx.request_repaint();
+        }
+    }
 }
 
 // MARK: - Tree Row Renderer
@@ -1656,82 +1736,9 @@ impl eframe::App for ViewerApp {
                 }
             }
 
-            AppTab::Text => {
-                self.show_text_toolbar(ctx, ui);
-                ui.separator();
+            AppTab::Text => self.show_text_tab(ctx, ui),
 
-                let font = egui::FontId::monospace(self.settings.font_size as f32);
-                // Virtualized editor: only the rows intersecting the viewport
-                // are shaped each frame, so cost is independent of file size.
-                if self.editor.show(ui, font) {
-                    self.doc.raw_text = self.editor.text().to_string();
-                    self.doc.mark_edited();
-                    self.last_edit = Instant::now();
-                    self.pending_reparse = true;
-                }
-
-                // Debounced re-parsing (350ms)
-                if self.pending_reparse && self.last_edit.elapsed().as_millis() > 350 {
-                    let s = self.settings.clone();
-                    let _ = self.doc.parse_and_build_tree(true, &s);
-                    self.pending_reparse = false;
-                    ctx.request_repaint();
-                }
-            }
-
-            AppTab::Split => {
-                ui.columns(2, |cols| {
-                    // Left: Live Text Editor with text toolbar
-                    {
-                        let left = &mut cols[0];
-                        self.show_text_toolbar(ctx, left);
-                        left.separator();
-
-                        let font = egui::FontId::monospace(self.settings.font_size as f32);
-                        if self.split_editor.show(left, font) {
-                            self.doc.raw_text = self.split_editor.text().to_string();
-                            self.editor.set_text(self.split_editor.text());
-                            self.doc.mark_edited();
-                            self.last_edit = Instant::now();
-                            self.pending_reparse = true;
-                        }
-                    }
-
-                    // Right: Tree Viewer + Property Grid + Search Toolbar
-                    {
-                        let right = &mut cols[1];
-                        self.show_tree_toolbar(ctx, right);
-                        right.separator();
-
-                        if self.show_search {
-                            self.show_search_toolbar(right);
-                            right.separator();
-                        }
-
-                        if self.show_props {
-                            show_two_columns_70_30(right, |tree_ui, props_ui| {
-                                tree_ui.group(|ui| {
-                                    ui.set_min_size(ui.available_size());
-                                    self.show_tree_view(ctx, ui);
-                                });
-                                props_ui.group(|ui| {
-                                    ui.set_min_size(ui.available_size());
-                                    self.show_property_grid(ctx, ui);
-                                });
-                            });
-                        } else {
-                            self.show_tree_view(ctx, right);
-                        }
-                    }
-                });
-
-                if self.pending_reparse && self.last_edit.elapsed().as_millis() > 350 {
-                    let s = self.settings.clone();
-                    let _ = self.doc.parse_and_build_tree(true, &s);
-                    self.pending_reparse = false;
-                    ctx.request_repaint();
-                }
-            }
+            AppTab::Split => self.show_split_tab(ctx, ui),
         });
 
         self.show_settings_window(ctx);

@@ -1251,9 +1251,7 @@ fn typing_in_the_text_tab_updates_the_document() {
     app.editor.set_text(&app.doc.raw_text);
 
     let mut draw = |app: &mut ViewerApp, ui: &mut egui::Ui| {
-        app.show_text_toolbar(&ctx, ui);
-        ui.separator();
-        app.editor.show(ui, egui::FontId::monospace(13.0));
+        app.show_text_tab(&ctx, ui);
     };
 
     // Settle, then type on the first row.
@@ -1291,10 +1289,7 @@ fn typing_in_the_split_tab_updates_the_both_editors() {
     app.editor.set_text(&app.doc.raw_text);
 
     let mut draw = |app: &mut ViewerApp, ui: &mut egui::Ui| {
-        ui.columns(2, |cols| {
-            app.split_editor.show(&mut cols[0], egui::FontId::monospace(13.0));
-            app.show_tree_view(&ctx, &mut cols[1]);
-        });
+        app.show_split_tab(&ctx, ui);
     };
 
     let _ = ctx.run(editor_raw(), |ctx| {
