@@ -178,9 +178,9 @@ public struct TextEditorView: View {
             Divider()
             
             // Editor Area with Native Text Editor
-            NativeCodeEditor(text: $model.rawText, fontSize: model.fontSize, wrapLines: model.settings.wrapLines)
+            NativeCodeEditor(model: model, fontSize: model.fontSize, wrapLines: model.settings.wrapLines)
                 .overlay(alignment: .topLeading) {
-                    if model.rawText.isEmpty {
+                    if model.isDocumentEmpty {
                         Text("Paste the JSON code here (your code is not saved anywhere)")
                             .font(.system(size: model.fontSize, design: .monospaced))
                             .foregroundColor(.secondary.opacity(0.6))
@@ -202,7 +202,7 @@ public struct TextEditorView: View {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.red)
                     }
-                } else if !model.rawText.isEmpty {
+                } else if !model.isDocumentEmpty {
                     HStack(spacing: 4) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(.green)
@@ -270,7 +270,7 @@ final class EditorTextView: NSTextView {
 
 // MARK: - AppKit High-Performance Native Code Editor
 struct NativeCodeEditor: NSViewRepresentable {
-    @Binding var text: String
+    @ObservedObject var model: JSONDocumentModel
     var fontSize: CGFloat = 13
     var wrapLines: Bool = false
     
@@ -288,7 +288,7 @@ struct NativeCodeEditor: NSViewRepresentable {
         // Explicitly build the TextKit 1 stack with NSTextStorage and NSLayoutManager.
         // This is the proven, highest-performance configuration for large documents in AppKit,
         // ensuring non-contiguous layout and idle background layout actually take effect.
-        let textStorage = NSTextStorage(string: text)
+        let textStorage = NSTextStorage(string: model.rawText)
         let layoutManager = NSLayoutManager()
         layoutManager.allowsNonContiguousLayout = true
         layoutManager.backgroundLayoutEnabled = true
@@ -341,6 +341,8 @@ struct NativeCodeEditor: NSViewRepresentable {
         
         textView.delegate = context.coordinator
         context.coordinator.textView = textView
+        context.coordinator.adoptDocument(textStorage: textStorage, text: model.rawText)
+        model.registerTextSource(context.coordinator)
         
         scrollView.documentView = textView
         return scrollView
@@ -376,13 +378,17 @@ struct NativeCodeEditor: NSViewRepresentable {
             textView.needsLayout = true
         }
         
-        // 3. Skip update if triggered from this text view's own typing
-        if context.coordinator.isUpdatingFromTextView {
+        // 3. Skip the text handoff when the editor is ahead of the model. Either this
+        //    update was caused by the editor's own change, or the model still holds
+        //    pre-edit text because the user is typing and nothing has pulled it in yet.
+        //    Writing the model's stale text back here would revert what was just typed.
+        if context.coordinator.isUpdatingFromTextView || model.hasPendingTextSync {
             return
         }
         
         // 4. Ultra-fast length check directly on NSTextStorage without copying full strings
         let currentLength = textStorage.length
+        let text = model.rawText
         let nsNewText = text as NSString
         let newLength = nsNewText.length
         
@@ -415,6 +421,10 @@ struct NativeCodeEditor: NSViewRepresentable {
             if !validRanges.isEmpty {
                 textView.selectedRanges = validRanges
             }
+            
+            // The buffer was replaced wholesale: re-anchor the incremental line count,
+            // which is maintained edit by edit and is now meaningless.
+            context.coordinator.adoptDocument(textStorage: textStorage, text: text)
         }
     }
     
@@ -422,22 +432,66 @@ struct NativeCodeEditor: NSViewRepresentable {
         if let textView = nsView.documentView as? NSTextView {
             textView.delegate = nil
         }
-        coordinator.textView = nil
+        // Unregistering flushes any edit that has not reached the model yet, so leaving
+        // the tab never loses the user's last keystrokes.
+        coordinator.detach()
     }
     
-    class Coordinator: NSObject, NSTextViewDelegate {
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate, JSONDocumentTextSource {
         var parent: NativeCodeEditor
         weak var textView: EditorTextView?
         var isUpdatingFromTextView: Bool = false
+        
+        /// Lines currently in the buffer, maintained edit by edit. Rescanning the
+        /// document to keep it correct costs a full copy of the text per keystroke,
+        /// which is exactly what this editor avoids.
+        private var trackedLineCount: Int = 1
+        /// What `NSTextStorage.length` should be once the edit in flight lands. Any
+        /// other value means an edit bypassed `shouldChangeTextIn`, so the tracked
+        /// line count is re-anchored from the buffer instead of guessed at.
+        private var expectedLength: Int?
+        /// Set after a re-anchor so a systematic mismatch (e.g. an undo that keeps
+        /// skipping the delegate) cannot rescan on every keystroke.
+        private var reanchorCooldown = 0
+        private static let reanchorCooldownLength = 8
         
         init(_ parent: NativeCodeEditor) {
             self.parent = parent
         }
         
+        var model: JSONDocumentModel { parent.model }
+        
+        var isActiveEditor: Bool {
+            guard let textView = textView else { return false }
+            return textView.window?.firstResponder === textView
+        }
+        
+        // Reading this copies the whole document, so the model only does it when it
+        // genuinely needs the text.
+        var currentText: String {
+            if let textView = textView {
+                return textView.string
+            }
+            return model.rawText
+        }
+        
+        /// Start tracking a buffer that was filled by the model rather than by typing.
+        func adoptDocument(textStorage: NSTextStorage, text: String) {
+            trackedLineCount = JSONDocumentModel.lineCount(of: text)
+            expectedLength = textStorage.length
+            reanchorCooldown = 0
+        }
+        
         func textDidChange(_ notification: Notification) {
-            guard let tv = notification.object as? NSTextView else { return }
+            guard let tv = notification.object as? NSTextView,
+                  let textStorage = tv.textStorage else { return }
             isUpdatingFromTextView = true
-            parent.text = tv.string
+            model.noteTextSourceEdited(self)
+            model.markEditedFromEditor(
+                lineCount: lineCount(of: tv, textStorage: textStorage),
+                characterCount: textStorage.length
+            )
             // Clear flag asynchronously after SwiftUI finishes this update cycle
             DispatchQueue.main.async { [weak self] in
                 self?.isUpdatingFromTextView = false
@@ -445,10 +499,59 @@ struct NativeCodeEditor: NSViewRepresentable {
         }
         
         func textDidEndEditing(_ notification: Notification) {
-            guard let tv = notification.object as? NSTextView else { return }
-            if parent.text != tv.string {
-                parent.text = tv.string
+            // Not typing any more: this is a free moment to bring the model up to date.
+            model.syncRawTextIfNeeded()
+        }
+        
+        /// Flush anything unsynced and stop being a source for the model.
+        func detach() {
+            model.unregisterTextSource(self)
+            textView = nil
+        }
+        
+        /// Called before every keystroke, paste and delete. The line count moves by
+        /// the lines the replacement adds minus the lines the replaced range removes,
+        /// which is a scan of the edit, not of the document.
+        func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString string: String?) -> Bool {
+            let inserted = string ?? ""
+            guard let textStorage = textView.textStorage else { return true }
+            if reanchorCooldown > 0 {
+                reanchorCooldown -= 1
             }
+            let removed = Self.newlines(in: textStorage, range: range)
+            let added = JSONDocumentModel.lineCount(of: inserted) - 1
+            trackedLineCount = max(1, trackedLineCount + added - removed)
+            expectedLength = textStorage.length - range.length + (inserted as NSString).length
+            return true
+        }
+        
+        private func lineCount(of textView: NSTextView, textStorage: NSTextStorage) -> Int {
+            if let expected = expectedLength, expected == textStorage.length {
+                expectedLength = nil
+                return trackedLineCount
+            }
+            // The buffer changed without going through shouldChangeTextIn, so the
+            // incremental count can no longer be trusted.
+            expectedLength = nil
+            trackedLineCount = JSONDocumentModel.lineCount(of: textStorage.string)
+            reanchorCooldown = Self.reanchorCooldownLength
+            return trackedLineCount
+        }
+        
+        /// Line feeds inside `range` of the buffer, without copying the whole document
+        /// for what is normally a single deleted character.
+        private static func newlines(in textStorage: NSTextStorage, range: NSRange) -> Int {
+            guard range.length > 0, range.location < textStorage.length else { return 0 }
+            let length = min(range.length, textStorage.length - range.location)
+            let slice = NSRange(location: range.location, length: length)
+            let text: String
+            if length <= 4_096 {
+                text = textStorage.attributedSubstring(from: slice).string
+            } else {
+                // A bulk delete: one full copy is cheaper than slicing attributes.
+                text = (textStorage.string as NSString).substring(with: slice)
+            }
+            return JSONDocumentModel.lineCount(of: text) - 1
         }
     }
 }

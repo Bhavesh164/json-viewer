@@ -250,8 +250,16 @@ extension JSONNode {
     ) -> JSONNode {
         switch value {
         case .object(let pairs):
-            let node = JSONNode(id: id, key: key, value: value, path: path, children: nil, parent: parent)
-            let builtChildren = pairs.map { pair in
+            // An object may legally repeat a key, and the editor lets you type one.
+            // The parser keeps every pair so Format / Minify / Save round-trip
+            // exactly what was written, but the tree is a *view*: it shows the value
+            // a consumer of the document would actually resolve — the last
+            // occurrence, as `JSON.parse` does — at the position of the first, so
+            // sibling keys do not move. Deduplication is per object, never per
+            // document: `[{"k":1},{"k":2}]` still shows two `k` rows.
+            let resolved = resolvingRepeatedKeys(pairs)
+            let node = JSONNode(id: id, key: key, value: .object(resolved), path: path, children: nil, parent: parent)
+            let builtChildren = resolved.map { pair in
                 let childPath = "\(path).\(pair.key)"
                 let candidateID = id == path ? childPath : "\(id).\(pair.key)"
                 let childID = uniqueID(from: candidateID, usedIDs: &usedIDs)
@@ -276,6 +284,25 @@ extension JSONNode {
         }
     }
 
+    /// Collapse repeated keys of one object down to their last value, keeping the
+    /// order — and therefore the position — of the first occurrence.
+    private static func resolvingRepeatedKeys(_ pairs: [JSONProperty]) -> [JSONProperty] {
+        guard pairs.count > 1 else { return pairs }
+        var resolved: [JSONProperty] = []
+        resolved.reserveCapacity(pairs.count)
+        var indexByKey: [String: Int] = [:]
+        indexByKey.reserveCapacity(pairs.count)
+        for pair in pairs {
+            if let existing = indexByKey[pair.key] {
+                resolved[existing] = pair
+            } else {
+                indexByKey[pair.key] = resolved.count
+                resolved.append(pair)
+            }
+        }
+        return resolved
+    }
+    
     private static func uniqueID(from candidate: String, usedIDs: inout Set<String>) -> String {
         guard usedIDs.contains(candidate) else {
             usedIDs.insert(candidate)
