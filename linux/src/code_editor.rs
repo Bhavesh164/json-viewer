@@ -321,19 +321,23 @@ impl TextBuffer {
     /// Replace the text between two cursors, returning the removed text and the
     /// cursor that ends up just after the inserted text.
     pub fn replace(&mut self, range: Range<Cursor>, insert: &str) -> (String, Cursor) {
+        // Anchor the rescan on the start of the first affected line. An edit
+        // beginning on that line never moves the line's own start offset, so
+        // the value read before the splice stays valid afterwards.
+        let first_line = self.clamp(range.start).line;
+        let start_of_line = self.line_starts[first_line];
         let a = self.byte_of(range.start);
         let b = self.byte_of(range.end).max(a);
         let removed = self.text[a..b].to_string();
         self.text.replace_range(a..b, insert);
-        self.reindex_from(range.start.line, a);
+        self.reindex_from(first_line, start_of_line);
         let end = self.cursor_of(a + insert.len());
         (removed, end)
     }
 
     /// Rebuild the line index for `line` and everything after it.
     ///
-    /// The byte offset of `line`'s start is unchanged by an edit that begins on
-    /// that line, so it is a valid anchor for the rescan.
+    /// `start_byte` must be the byte offset where `line` begins.
     fn reindex_from(&mut self, line: usize, start_byte: usize) {
         self.version += 1;
         let tail = scan(&self.text[start_byte..]);
@@ -960,19 +964,25 @@ impl CodeEditor {
                 Event::Key {
                     key,
                     pressed: true,
+                    modifiers,
                     ..
-                } => keys.push(key),
+                } => keys.push((key, modifiers)),
                 _ => {}
             }
         }
 
-        let (ctrl, shift, alt) = ui.input(|i| (i.modifiers.ctrl, i.modifiers.shift, i.modifiers.alt));
-        for key in keys {
+        for (key, mods) in keys {
+            // The modifiers carried by the event itself are used, not the ones
+            // on the frame, so a key press is always interpreted the way it was
+            // reported.
+            let ctrl = mods.ctrl;
+            let shift = mods.shift;
+            let alt = mods.alt;
             // Editor keys are consumed so egui's Tab focus traversal and the
             // surrounding scroll area do not also react to them. App-level
             // shortcuts (Ctrl+S, Ctrl+O, ...) are deliberately left alone.
             if self.handle_key(ui, key, ctrl, shift, alt) {
-                ui.input_mut(|i| i.consume_key(i.modifiers, key));
+                ui.input_mut(|i| i.consume_key(mods, key));
                 handled = true;
             }
         }

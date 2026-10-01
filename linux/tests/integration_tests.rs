@@ -146,7 +146,7 @@ fn egui_frame_simulations_all_tabs() {
     let _ = ctx.run(Default::default(), |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
             app.show_main_header(ui);
-            app.show_text_toolbar(ctx, ui);
+            app.show_text_toolbar(&ctx, ui);
         });
     });
 
@@ -156,9 +156,9 @@ fn egui_frame_simulations_all_tabs() {
         egui::CentralPanel::default().show(ctx, |ui| {
             app.show_main_header(ui);
             ui.columns(2, |cols| {
-                app.show_text_toolbar(ctx, &mut cols[0]);
+                app.show_text_toolbar(&ctx, &mut cols[0]);
                 app.show_tree_toolbar(ctx, &mut cols[1]);
-                app.show_tree_view(ctx, &mut cols[1]);
+                app.show_tree_view(&ctx, &mut cols[1]);
             });
         });
     });
@@ -759,4 +759,310 @@ fn returning_to_viewer_restores_scroll_for_selected_match() {
     assert_eq!(app.doc.selected_id.as_deref(), Some(selected.as_str()));
     assert_eq!(app.doc.requested_scroll_id.as_deref(), Some(selected.as_str()));
     assert!(app.doc.visible_tree_rows.iter().any(|r| r.id == selected));
+}
+
+// ---------------------------------------------------------------- code editor
+
+use jsonviewer::code_editor::{CodeEditor, Cursor, TextBuffer};
+
+fn editor_raw() -> egui::RawInput {
+    let mut raw = egui::RawInput::default();
+    raw.screen_rect = Some(egui::Rect::from_min_size(
+        egui::pos2(0.0, 0.0),
+        egui::vec2(1200.0, 800.0),
+    ));
+    raw.viewport_id = egui::ViewportId::ROOT;
+    raw
+}
+
+fn mods(m: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::A,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: m,
+    }
+}
+
+fn key(k: egui::Key) -> egui::Event {
+    egui::Event::Key {
+        key: k,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }
+}
+
+/// Run one editor frame, optionally returning whether the text changed.
+fn frame(ctx: &egui::Context, editor: &mut CodeEditor, events: Vec<egui::Event>) -> bool {
+    let mut raw = editor_raw();
+    raw.events = events;
+    let mut changed = false;
+    let _ = ctx.run(raw, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            changed = editor.show(ui, egui::FontId::monospace(13.0));
+        });
+    });
+    changed
+}
+
+/// Give the editor keyboard focus the same way the Text tab does.
+fn focus(ctx: &egui::Context, editor: &mut CodeEditor) {
+    editor.request_focus();
+    let _ = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, egui::FontId::monospace(13.0));
+        });
+    });
+}
+
+#[test]
+fn line_index_matches_document() {
+    let mut buf = TextBuffer::new("alpha\nbeta\n\ngamma\n");
+    assert_eq!(buf.line_count(), 5, "a trailing newline opens a final empty line");
+    assert_eq!(buf.line_str(0), "alpha");
+    assert_eq!(buf.line_str(2), "");
+    assert_eq!(buf.line_str(4), "");
+    assert_eq!(buf.line_cols(0), 5);
+    assert_eq!(buf.max_cols(), 5);
+
+    // Byte offsets and columns round-trip.
+    for (line, col) in [(0, 0), (0, 5), (1, 2), (2, 0), (3, 4), (4, 0)] {
+        let c = Cursor { line, col };
+        assert_eq!(buf.cursor_of(buf.byte_of(c)), c, "cursor round-trip {c:?}");
+    }
+
+    // Splicing inside a line keeps the index and width statistics correct.
+    let (removed, end) = buf.replace(Cursor { line: 0, col: 1 }..Cursor { line: 0, col: 3 }, "XYZW");
+    assert_eq!(removed, "lp");
+    assert_eq!(end, Cursor { line: 0, col: 5 }, "caret lands after the inserted text");
+    assert_eq!(buf.text(), "aXYZWha\nbeta\n\ngamma\n");
+    assert_eq!(buf.line_count(), 5);
+    assert_eq!(buf.line_cols(0), 7, "the edited line is now the widest");
+    assert_eq!(buf.max_cols(), 7);
+    assert_eq!(buf.cursor_of(buf.byte_of(Cursor { line: 3, col: 2 })), Cursor { line: 3, col: 2 });
+
+    // Adding a newline reindexes, and the widest-line statistic is recomputed.
+    let mut buf = TextBuffer::new("aaaaaaaaaaaaaaaaaaaa\nb\n");
+    assert_eq!(buf.max_cols(), 20);
+    let _ = buf.replace(Cursor { line: 0, col: 0 }..Cursor { line: 0, col: 0 }, "\n");
+    assert_eq!(buf.line_count(), 4);
+    assert_eq!(buf.line_str(1), "aaaaaaaaaaaaaaaaaaaa");
+    assert_eq!(buf.max_cols(), 20, "the longest line moved down one line");
+}
+
+#[test]
+fn line_index_handles_utf8_and_tabs() {
+    let buf = TextBuffer::new("a\tb\nnaïve\n日本語\n");
+    assert!(!buf.is_simple(), "tabs and non-ASCII disable the byte==column fast path");
+    // A tab advances to the next 4-column stop. Accented Latin letters stay
+    // narrow in a monospaced grid; CJK is double width.
+    assert_eq!(buf.line_cols(0), 5, "'a' then tab to column 4, then 'b'");
+    assert_eq!(buf.line_cols(1), 5, "n a ï v e, all narrow");
+    assert_eq!(buf.line_cols(2), 6, "three double-width characters");
+    assert_eq!(buf.max_cols(), 6);
+    for (line, col) in [(0, 0), (0, 5), (1, 5), (2, 6)] {
+        let c = Cursor { line, col };
+        assert_eq!(buf.cursor_of(buf.byte_of(c)), c, "round-trip {c:?}");
+    }
+    // A column past the end of the line clamps instead of running off it.
+    let past = Cursor { line: 1, col: 99 };
+    assert_eq!(buf.clamp(past), Cursor { line: 1, col: 5 });
+}
+
+#[test]
+fn typing_reports_change_and_moves_the_caret() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut editor = CodeEditor::new("ab");
+    focus(&ctx, &mut editor);
+
+    let changed = frame(
+        &ctx,
+        &mut editor,
+        vec![egui::Event::Text("x".to_string())],
+    );
+    assert!(changed, "typing reports a change so the document is re-parsed");
+    assert_eq!(editor.text(), "xab");
+    assert_eq!(editor.cursor(), Cursor { line: 0, col: 1 });
+}
+
+#[test]
+fn editing_navigation_and_undo_redo() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut editor = CodeEditor::new("one\ntwo\nthree\n");
+    focus(&ctx, &mut editor);
+
+    // Walk down two lines, then extend the selection to the end of that line.
+    frame(&ctx, &mut editor, vec![key(egui::Key::ArrowDown)]);
+    frame(&ctx, &mut editor, vec![key(egui::Key::ArrowDown)]);
+    assert_eq!(editor.cursor(), Cursor { line: 2, col: 0 });
+
+    let mut shifted = key(egui::Key::End);
+    if let egui::Event::Key { modifiers, .. } = &mut shifted {
+        modifiers.shift = true;
+    }
+    frame(&ctx, &mut editor, vec![shifted]);
+    assert_eq!(editor.selected_text(), "three", "shift+End selects to end of line");
+    assert!(editor.has_selection());
+
+    // Typing replaces the selection; undo and redo walk the same steps. The
+    // trailing newline survives because only "three" was selected.
+    frame(&ctx, &mut editor, vec![egui::Event::Text("X".to_string())]);
+    assert_eq!(editor.text(), "one\ntwo\nX\n");
+    editor.undo();
+    assert_eq!(editor.text(), "one\ntwo\nthree\n");
+    editor.redo();
+    assert_eq!(editor.text(), "one\ntwo\nX\n");
+
+    // Backspace at the start of a line joins it to the previous line.
+    let _ = ctx.run(editor_raw(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            editor.show(ui, egui::FontId::monospace(13.0));
+        });
+    });
+    frame(&ctx, &mut editor, vec![key(egui::Key::Backspace)]);
+    assert_eq!(editor.text(), "one\ntwoX\n");
+    editor.undo();
+    assert_eq!(editor.text(), "one\ntwo\nX\n");
+}
+
+#[test]
+fn ctrl_select_all_then_delete_clears_the_document() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let mut editor = CodeEditor::new("alpha\nbeta\n");
+    focus(&ctx, &mut editor);
+
+    let mut ctrl_a = key(egui::Key::A);
+    if let egui::Event::Key { modifiers, .. } = &mut ctrl_a {
+        modifiers.ctrl = true;
+    }
+    frame(&ctx, &mut editor, vec![ctrl_a]);
+    assert_eq!(editor.selected_text(), "alpha\nbeta\n");
+
+    frame(&ctx, &mut editor, vec![key(egui::Key::Backspace)]);
+    assert_eq!(editor.text(), "");
+    assert_eq!(
+        editor.buffer().line_count(),
+        1,
+        "an empty document is still one empty line"
+    );
+}
+
+#[test]
+fn virtualized_editor_keeps_frames_cheap_on_huge_documents() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+
+    // ~8 MB across 100k lines. Frame cost must not scale with the document,
+    // which is the whole point of only shaping the visible rows.
+    let mut text = String::from("{\n  \"records\": [\n");
+    for i in 0..100_000 {
+        if i > 0 {
+            text.push_str(",\n");
+        }
+        text.push_str(&format!(
+            "    {{\"id\": {i}, \"name\": \"name_{i}\", \"tags\": [\"a\", \"b\"], \
+             \"address\": {{\"city\": \"City{}\", \"zip\": \"00000\"}}}}",
+            i % 400
+        ));
+    }
+    text.push_str("\n  ]\n}");
+    assert!(text.len() > 8_000_000, "fixture should be multi-megabyte");
+
+    let mut big = CodeEditor::new(&text);
+    focus(&ctx, &mut big);
+
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        frame(&ctx, &mut big, Vec::new());
+    }
+    let per_frame = start.elapsed().as_secs_f64() * 100.0;
+    assert_eq!(big.text(), text, "painting must not alter the document");
+    assert!(
+        per_frame < 16.0,
+        "8 MB document must stay inside a 16 ms frame, took {per_frame:.2} ms"
+    );
+}
+
+#[test]
+fn minified_single_line_document_stays_cheap() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    // A minified document is one enormous line, so the editor must clip
+    // columns to the viewport instead of shaping the whole line every frame.
+    let text = format!("[{}{}]", "\"x\",".repeat(400_000), "0");
+    assert_eq!(text.lines().count(), 1);
+
+    let mut editor = CodeEditor::new(&text);
+    focus(&ctx, &mut editor);
+
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        frame(&ctx, &mut editor, Vec::new());
+    }
+    let per_frame = start.elapsed().as_secs_f64() * 100.0;
+    assert!(
+        per_frame < 16.0,
+        "single-line document must stay inside a 16 ms frame, took {per_frame:.2} ms"
+    );
+}
+
+#[test]
+fn text_tab_and_split_tab_render_heavy_documents() {
+    let ctx = egui::Context::default();
+    setup_fonts(&ctx);
+    let s = Settings::default();
+
+    let mut heavy = String::from("{\n  \"records\": [\n");
+    for i in 0..20_000 {
+        if i > 0 {
+            heavy.push_str(",\n");
+        }
+        heavy.push_str(&format!("    {{\"id\": {i}, \"name\": \"name_{i}\"}}}}"));
+    }
+    heavy.push_str("\n  ]\n}");
+
+    let mut app = ViewerApp::new(s, None);
+    app.doc.raw_text = heavy;
+    app.doc.update_metrics();
+
+    for tab in [AppTab::Text, AppTab::Split] {
+        app.doc.active_tab = tab;
+        app.last_tab = tab;
+        app.editor.set_text(&app.doc.raw_text);
+        app.split_editor.set_text(&app.doc.raw_text);
+
+        let mut draw = |app: &mut ViewerApp, ui: &mut egui::Ui| match tab {
+            AppTab::Text => {
+                app.show_text_toolbar(&ctx, ui);
+                ui.separator();
+                app.editor.show(ui, egui::FontId::monospace(13.0));
+            }
+            _ => {
+                ui.columns(2, |cols| {
+                    app.show_text_toolbar(&ctx, &mut cols[0]);
+                    app.split_editor.show(&mut cols[0], egui::FontId::monospace(13.0));
+                    app.show_tree_view(&ctx, &mut cols[1]);
+                });
+            }
+        };
+
+        // First frame rasterises the font atlas, so measure the steady state.
+        let _ = ctx.run(editor_raw(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+        });
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            let _ = ctx.run(editor_raw(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| draw(&mut app, ui));
+            });
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / 5.0;
+        assert!(ms < 16.0, "{tab:?} tab frame on a ~1 MB document: {ms:.2} ms");
+    }
 }
