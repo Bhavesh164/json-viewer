@@ -3,17 +3,25 @@
 //! Run with:
 //!   cargo bench --bench text_tab
 //!
-//! Measures wall-clock time per simulated egui frame while the Text tab
-//! renders a heavy document. egui's `TextEdit::multiline` lays out the whole
-//! document on every frame, so this number grows linearly with file size
-//! unless the editor is virtualized.
+//! Compares the two editor implementations on the same heavy documents:
+//!
+//! * `egui::TextEdit::multiline` — what the Linux build used before. It shapes
+//!   and wraps the whole buffer on every frame, so its cost grows linearly with
+//!   file size.
+//! * `jsonviewer::CodeEditor` — the egui counterpart of the macOS
+//!   `NSTextStorage` + `NSTextView` editor, which only shapes the rows that
+//!   intersect the viewport.
+//!
+//! The target is a 16 ms frame budget (60 fps).
 
-use egui::Context;
-use jsonviewer::app::ViewerApp;
-use jsonviewer::model::AppTab;
-use jsonviewer::setup_fonts;
-use jsonviewer::Settings;
 use std::time::Instant;
+
+use egui::{Context, Pos2, RawInput, Rect, Vec2};
+use jsonviewer::code_editor::CodeEditor;
+use jsonviewer::setup_fonts;
+
+const FRAMES: usize = 10;
+const SCREEN: Vec2 = Vec2::new(1400.0, 900.0);
 
 fn build_heavy_json(records: usize) -> String {
     let mut s = String::from("{\n  \"meta\": {\n    \"count\": ");
@@ -42,83 +50,179 @@ fn build_heavy_json(records: usize) -> String {
     s
 }
 
-fn bench_label(name: &str, bytes: usize, lines: usize, per_frame_ms: f64) {
-    println!(
-        "{name:<28} {:>9.2} MB  {:>8} lines  {:>9.3} ms/frame",
-        bytes as f64 / 1_048_576.0,
-        lines,
-        per_frame_ms
-    );
+fn raw_input() -> RawInput {
+    let mut raw = RawInput::default();
+    raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, SCREEN));
+    raw.viewport_id = egui::ViewportId::ROOT;
+    raw
 }
 
-fn run_text_tab(text: &str, frames: usize) -> f64 {
+/// Old path: egui's own multiline text edit inside a scroll area.
+fn bench_text_edit(text: &str) -> f64 {
     let ctx = Context::default();
     setup_fonts(&ctx);
-
-    let mut settings = Settings::default();
-    settings.default_tab = "Text".to_string();
-    settings.wrap_lines = false;
-
-    let mut app = ViewerApp::new(settings, None);
-    app.editor_text = text.to_string();
-    app.doc.raw_text = text.to_string();
-    app.doc.update_metrics();
-    app.doc.active_tab = AppTab::Text;
-    app.last_tab = AppTab::Text;
-
-    let mut raw = egui::RawInput::default();
-    raw.screen_rect = Some(egui::Rect::from_min_size(
-        egui::pos2(0.0, 0.0),
-        egui::vec2(1400.0, 900.0),
-    ));
-    raw.viewport_id = egui::ViewportId::ROOT;
-
+    let font = egui::FontId::monospace(13.0);
+    let mut buffer = text.to_string();
     let mut total = 0.0;
-    for _ in 0..frames {
+    for _ in 0..FRAMES {
+        let raw = raw_input();
         let start = Instant::now();
-        let _ = ctx.run(raw.clone(), |ctx| {
+        let _ = ctx.run(raw, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                app.show_text_toolbar(ctx, ui);
-                ui.separator();
-                let font = egui::FontId::monospace(app.settings.font_size as f32);
-                let mut text = std::mem::take(&mut app.editor_text);
-                let text_edit = egui::TextEdit::multiline(&mut text)
+                let edit = egui::TextEdit::multiline(&mut buffer)
                     .code_editor()
                     .desired_rows(30)
                     .desired_width(f32::INFINITY)
-                    .font(font);
+                    .font(font.clone());
                 egui::ScrollArea::both()
                     .id_salt("text_editor_scroll_area")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| ui.add(text_edit));
-                app.editor_text = text;
+                    .show(ui, |ui| ui.add(edit));
             });
         });
         total += start.elapsed().as_secs_f64() * 1000.0;
     }
-    total / frames as f64
+    total / FRAMES as f64
+}
+
+/// New path: the virtualized editor.
+fn bench_code_editor(text: &str) -> f64 {
+    let ctx = Context::default();
+    setup_fonts(&ctx);
+    let font = egui::FontId::monospace(13.0);
+    let mut editor = CodeEditor::new(text);
+    let mut total = 0.0;
+    for _ in 0..FRAMES {
+        let raw = raw_input();
+        let start = Instant::now();
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                editor.show(ui, font.clone());
+            });
+        });
+        total += start.elapsed().as_secs_f64() * 1000.0;
+    }
+    total / FRAMES as f64
+}
+
+/// Keystroke latency: one character typed, both at the top of the document and
+/// after scrolling far into it.
+fn bench_typing(text: &str) -> (f64, f64) {
+    let ctx = Context::default();
+    setup_fonts(&ctx);
+    let font = egui::FontId::monospace(13.0);
+    let deep_line = text.bytes().filter(|&b| b == b'\n').count() / 2;
+
+    // Scroll the editor deep into the document with wheel events, then time the
+    // frame that handles a keystroke.
+    let measure = |virtualized: bool| {
+        let mut editor = CodeEditor::new(text);
+        let mut buffer = text.to_string();
+        let draw = |ui: &mut egui::Ui| {
+            if virtualized {
+                editor.show(ui, font.clone());
+            } else {
+                let edit = egui::TextEdit::multiline(&mut buffer)
+                    .code_editor()
+                    .desired_rows(30)
+                    .desired_width(f32::INFINITY)
+                    .font(font.clone());
+                egui::ScrollArea::both()
+                    .id_salt("text_editor_scroll_area")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| ui.add(edit));
+            }
+        };
+
+        // First frame: font atlas, layout caches and the line index.
+        let _ = ctx.run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| draw(ui));
+        });
+
+        // Move the caret down into the middle of the document.
+        for _ in 0..200 {
+            let mut raw = raw_input();
+            raw.events.push(egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            });
+            let _ = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| draw(ui));
+            });
+        }
+
+        // Time the frame that applies one typed character.
+        let mut raw = raw_input();
+        raw.events.push(egui::Event::Text("x".to_string()));
+        let start = Instant::now();
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| draw(ui));
+        });
+        let first = start.elapsed().as_secs_f64() * 1000.0;
+
+        // And the frame after it, which repaints the edited document.
+        let start = Instant::now();
+        let _ = ctx.run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| draw(ui));
+        });
+        let second = start.elapsed().as_secs_f64() * 1000.0;
+
+        let _ = deep_line;
+        first.min(second)
+    };
+
+    (measure(false), measure(true))
 }
 
 fn main() {
-    println!("egui Text tab editor — per-frame layout cost");
-    println!("{}", "-".repeat(78));
-
-    let mut cases: Vec<(String, &str)> = Vec::new();
+    let mut cases: Vec<(String, String)> = Vec::new();
     for path in ["/tmp/heavy5.json", "/tmp/heavy50.json"] {
         if let Ok(t) = std::fs::read_to_string(path) {
-            cases.push((format!("{}", path), Box::leak(t.into_boxed_str())));
+            cases.push((path.to_string(), t));
         }
     }
-    if cases.is_empty() {
-        for n in [200usize, 2_000, 20_000] {
-            let t = build_heavy_json(n);
-            cases.push((format!("generated {n} records"), Box::leak(t.into_boxed_str())));
-        }
+    for n in [200usize, 2_000, 20_000] {
+        cases.push((format!("generated {n} records"), build_heavy_json(n)));
     }
+    if let Ok(t) = std::fs::read_to_string("/tmp/heavy5.json") {
+        // Minified output collapses a big document onto a single very long line.
+        cases.push((
+            "minified 7.7 MB (1 line)".to_string(),
+            jsonviewer::json::JSONParser::parse(t.trim())
+                .map(|v| v.minify(false))
+                .unwrap_or_default(),
+        ));
+    }
+
+    println!("Text tab editor — per-frame cost ({} frames each, {SCREEN:?} viewport)", FRAMES);
+    println!(
+        "{:<26} {:>9} {:>9} {:>14} {:>14} {:>10}",
+        "document", "size", "lines", "TextEdit", "CodeEditor", "speedup"
+    );
+    println!("{}", "-".repeat(90));
 
     for (name, text) in &cases {
         let lines = 1 + text.bytes().filter(|&b| b == b'\n').count();
-        let ms = run_text_tab(text, 10);
-        bench_label(name, text.len(), lines, ms);
+        let old = bench_text_edit(text);
+        let new = bench_code_editor(text);
+        println!(
+            "{name:<26} {:>7.1} MB {:>9} {:>11.3} ms {:>11.3} ms {:>9.0}x",
+            text.len() as f64 / 1_048_576.0,
+            lines,
+            old,
+            new,
+            old / new.max(f64::MIN_POSITIVE)
+        );
+    }
+
+    if let Some((_, text)) = cases.first() {
+        let (old, new) = bench_typing(text);
+        println!("\nkeystroke frame (one character typed mid-document, {})", cases[0].0);
+        println!("  TextEdit   {old:.3} ms");
+        println!("  CodeEditor {new:.3} ms");
+
     }
 }

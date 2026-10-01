@@ -12,6 +12,7 @@
 //! - Global shortcuts parity matching macOS (Ctrl+1/2/3, Ctrl+F, Ctrl+G, Ctrl+E, Ctrl+Alt+P, Ctrl+O, Ctrl+S)
 
 use crate::clipboard;
+use crate::code_editor::CodeEditor;
 use crate::model::{AppTab, DocumentModel, FlatTreeRow, PropertyRow};
 use crate::settings::Settings;
 use std::time::Instant;
@@ -19,8 +20,11 @@ use std::time::Instant;
 pub struct ViewerApp {
     pub doc: DocumentModel,
     pub settings: Settings,
-    pub editor_text: String,
-    pub split_text: String,
+    /// Text tab editor. Owns the document text plus the line index that keeps
+    /// per-frame layout proportional to the visible rows only.
+    pub editor: CodeEditor,
+    /// Split tab editor. Kept in sync with [`Self::editor`].
+    pub split_editor: CodeEditor,
     pub search_input: String,
     pub show_props: bool,
     pub show_search: bool,
@@ -56,15 +60,14 @@ impl ViewerApp {
                 let _ = doc.parse_and_build_tree(true, &settings);
             }
         }
-        let editor_text = doc.raw_text.clone();
-        let split_text = doc.raw_text.clone();
         let initial_tab = doc.active_tab;
+        let initial_text = doc.raw_text.clone();
 
         Self {
             doc,
             settings: settings.clone(),
-            editor_text,
-            split_text,
+            editor: CodeEditor::new(&initial_text),
+            split_editor: CodeEditor::new(&initial_text),
             search_input: String::new(),
             show_props: true,
             show_search: true,
@@ -96,8 +99,8 @@ impl ViewerApp {
     }
 
     fn sync_editors_from_doc(&mut self) {
-        self.editor_text = self.doc.raw_text.clone();
-        self.split_text = self.doc.raw_text.clone();
+        self.editor.set_text(&self.doc.raw_text);
+        self.split_editor.set_text(&self.doc.raw_text);
         self.pending_reparse = false;
     }
 
@@ -215,11 +218,11 @@ impl ViewerApp {
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Num2)) {
                 self.doc.active_tab = AppTab::Text;
-                self.editor_text = self.doc.raw_text.clone();
+                self.editor.set_text(&self.doc.raw_text);
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Num3)) {
                 self.doc.active_tab = AppTab::Split;
-                self.split_text = self.doc.raw_text.clone();
+                self.split_editor.set_text(&self.doc.raw_text);
             }
             if ctx.input(|i| i.key_pressed(egui::Key::E)) {
                 if shift {
@@ -1608,8 +1611,8 @@ impl eframe::App for ViewerApp {
         // Tab synchronization
         if self.last_tab != self.doc.active_tab {
             match self.doc.active_tab {
-                AppTab::Text => self.editor_text = self.doc.raw_text.clone(),
-                AppTab::Split => self.split_text = self.doc.raw_text.clone(),
+                AppTab::Text => self.editor.set_text(&self.doc.raw_text),
+                AppTab::Split => self.split_editor.set_text(&self.doc.raw_text),
                 AppTab::Viewer => {
                     let s = self.settings.clone();
                     self.doc.parse_and_build_tree(true, &s);
@@ -1658,19 +1661,10 @@ impl eframe::App for ViewerApp {
                 ui.separator();
 
                 let font = egui::FontId::monospace(self.settings.font_size as f32);
-                let text_edit = egui::TextEdit::multiline(&mut self.editor_text)
-                    .code_editor()
-                    .desired_rows(30)
-                    .desired_width(f32::INFINITY)
-                    .font(font);
-
-                let resp = egui::ScrollArea::both()
-                    .id_salt("text_editor_scroll_area")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| ui.add(text_edit)).inner;
-
-                if resp.changed() {
-                    self.doc.raw_text = self.editor_text.clone();
+                // Virtualized editor: only the rows intersecting the viewport
+                // are shaped each frame, so cost is independent of file size.
+                if self.editor.show(ui, font) {
+                    self.doc.raw_text = self.editor.text().to_string();
                     self.doc.mark_edited();
                     self.last_edit = Instant::now();
                     self.pending_reparse = true;
@@ -1694,20 +1688,9 @@ impl eframe::App for ViewerApp {
                         left.separator();
 
                         let font = egui::FontId::monospace(self.settings.font_size as f32);
-                        let text_edit = egui::TextEdit::multiline(&mut self.split_text)
-                            .code_editor()
-                            .desired_rows(30)
-                            .desired_width(f32::INFINITY)
-                            .font(font);
-
-                        let resp = egui::ScrollArea::both()
-                            .id_salt("split_editor_scroll_area")
-                            .auto_shrink([false, false])
-                            .show(left, |ui| ui.add(text_edit)).inner;
-
-                        if resp.changed() {
-                            self.doc.raw_text = self.split_text.clone();
-                            self.editor_text = self.split_text.clone();
+                        if self.split_editor.show(left, font) {
+                            self.doc.raw_text = self.split_editor.text().to_string();
+                            self.editor.set_text(self.split_editor.text());
                             self.doc.mark_edited();
                             self.last_edit = Instant::now();
                             self.pending_reparse = true;

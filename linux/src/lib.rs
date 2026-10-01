@@ -1,5 +1,6 @@
 pub mod app;
 pub mod clipboard;
+pub mod code_editor;
 pub mod desktop;
 pub mod json;
 pub mod model;
@@ -7,6 +8,7 @@ pub mod python;
 pub mod settings;
 
 pub use app::ViewerApp;
+pub use code_editor::{CodeEditor, Cursor, TextBuffer};
 pub use json::JSONParser;
 pub use model::{AppTab, DocumentModel};
 pub use python::parse_python_literal;
