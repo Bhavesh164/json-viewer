@@ -596,6 +596,9 @@ switches and improve the performance and don't introduce any more bugs."*
   `expandedContainerIds`, `expandedLeafIds`, and traverses `root` to precompute `visibleRows: [FlatTreeRow]`.
   `applyParse` on the MainActor applies precomputed collections in ~0.5 ms rather than running a 40,000+
   node traversal on the UI thread.
+- **Precomputed property-grid rows off the main thread:** the selected root can have tens of thousands
+  of direct properties. `parseDocument` now builds those rows along with the tree, and `applyParse`
+  installs them without triggering the selection observer to rebuild them a second time on the UI thread.
 - **Scroll request synchronization on appear:**
   `TreeViewer.onAppear` synchronizes its internal tracking counters (`lastHandledNavigationRequest = model.treeNavigationRequest`,
   `lastHandledScrollToTopRequest = model.treeScrollToTopRequest`). It only scrolls when an explicit

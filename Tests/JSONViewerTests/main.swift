@@ -1363,10 +1363,14 @@ do {
 // 34. Benchmark: 5MB JSON edit and tab switch
 do {
     let count = 40_000
-    let items = (0..<count).map { "{\"id\": \($0), \"name\": \"item_\($0)\", \"value\": \($0 * 2)}" }.joined(separator: ",\n")
+    let repeatedPayload = String(repeating: "x", count: 59)
+    let items = (0..<count).map {
+        "{\"id\": \($0), \"name\": \"item_\($0)\", \"value\": \($0 * 2), \"payload\": \"\(repeatedPayload)\"}"
+    }.joined(separator: ",\n")
     let json = "[\n" + items + "\n]"
     print("\n--- 5MB Benchmark ---")
     print("Document size: \(Double(json.utf8.count) / (1024.0 * 1024.0)) MB (\(json.utf8.count) bytes)")
+    assertTest(json.utf8.count >= 5_000_000, "Benchmark exercises at least 5 MB of JSON")
     
     let model = JSONDocumentModel()
     model.rawText = json
@@ -1378,7 +1382,8 @@ do {
     
     // Simulate user editing 3rd row while in Text tab:
     model.selectTab(.text)
-    let fakeSource = FakeTextSource(text: json.replacingOccurrences(of: "\"id\": 0", with: "\"id\": 999999"))
+    let editedJSON = json.replacingOccurrences(of: "\"name\": \"item_2\"", with: "\"name\": \"edited_2\"")
+    let fakeSource = FakeTextSource(text: editedJSON)
     model.registerTextSource(fakeSource)
     model.noteTextSourceEdited(fakeSource)
     model.markEditedFromEditor(lineCount: count + 2, characterCount: (fakeSource.text as NSString).length)
@@ -1398,6 +1403,8 @@ do {
     print("Rebuilt visible rows: \(model.visibleTreeRows.count)")
     
     assertTest(model.visibleTreeRows.count == count + 1, "5MB tree has all rows")
+    assertTest(model.selectedNodeProperties.count == count, "5MB root properties are prepared for the grid")
+    assertTest(model.findNode(byId: "$[2].name")?.valueString == "edited_2", "The third-row edit is in the rebuilt tree")
     assertTest(model.isDirty == false, "5MB tree is clean after rebuild")
     model.unregisterTextSource(fakeSource)
 }

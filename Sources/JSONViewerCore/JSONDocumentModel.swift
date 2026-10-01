@@ -89,13 +89,19 @@ public final class JSONDocumentModel: ObservableObject {
     @Published public var rootNode: JSONNode?
     @Published public var selectedNode: JSONNode? {
         didSet {
-            updateSelectedNodeProperties()
+            if !isApplyingParseSelection {
+                updateSelectedNodeProperties()
+            }
         }
     }
     @Published public var expandedNodeIds: Set<String> = []
     @Published public var expandedLeafNodeIds: Set<String> = []
     @Published public var visibleTreeRows: [FlatTreeRow] = []
     @Published public var selectedNodeProperties: [PropertyGridRow] = []
+    /// Parsing already resolves the new selection off the main thread. Avoid having
+    /// its property observer rebuild a potentially huge grid before the prepared rows
+    /// from that parse outcome are installed.
+    private var isApplyingParseSelection = false
     public let settings: AppSettings
     @Published public var fontSize: CGFloat = 12.0 {
         didSet {
@@ -571,6 +577,7 @@ public final class JSONDocumentModel: ObservableObject {
         /// The nodes to carry over from the previous tree, resolved by the parse.
         var restored: RestoredNodes?
         var selectedNode: JSONNode?
+        var selectedNodeProperties: [PropertyGridRow] = []
         var expandedContainerIds: Set<String> = []
         var expandedLeafIds: Set<String> = []
         var visibleRows: [FlatTreeRow] = []
@@ -652,6 +659,7 @@ public final class JSONDocumentModel: ObservableObject {
         let selected = restore.selectedId.flatMap { restored.byID[$0] }
             ?? restore.selectedPath.flatMap { restored.byPath[$0] }
             ?? root
+        let selectedProperties = selected.propertiesForGrid()
         
         var validExpanded = restore.expandedContainerIds.filter { restored.byID[$0]?.isContainer == true }
         validExpanded.insert(root.id)
@@ -674,6 +682,7 @@ public final class JSONDocumentModel: ObservableObject {
             root: root,
             restored: restored,
             selectedNode: selected,
+            selectedNodeProperties: selectedProperties,
             expandedContainerIds: validExpanded,
             expandedLeafIds: validLeafExpanded,
             visibleRows: rows,
@@ -791,10 +800,14 @@ public final class JSONDocumentModel: ObservableObject {
         self.jsonValue = parsed
         self.rootNode = root
         
-        self.selectedNode = outcome.selectedNode
+        let nextSelectedNode = outcome.selectedNode
             ?? previousSelectionID.flatMap { restored.byID[$0] }
             ?? previousSelectionPath.flatMap { restored.byPath[$0] }
             ?? root
+        isApplyingParseSelection = true
+        self.selectedNode = nextSelectedNode
+        isApplyingParseSelection = false
+        self.selectedNodeProperties = outcome.selectedNodeProperties
         self.expandedNodeIds = outcome.expandedContainerIds.isEmpty
             ? (previousExpandedIds.filter { restored.byID[$0]?.isContainer == true }.union([root.id]))
             : outcome.expandedContainerIds
@@ -806,7 +819,6 @@ public final class JSONDocumentModel: ObservableObject {
         } else {
             self.updateVisibleRows()
         }
-        self.updateSelectedNodeProperties()
         self.parseError = nil
         self.isDirty = false
         return (true, rewroteText)
