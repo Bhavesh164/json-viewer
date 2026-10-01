@@ -118,7 +118,7 @@ fn bench_typing(text: &str) -> (f64, f64) {
     let measure = |virtualized: bool| {
         let mut editor = CodeEditor::new(text);
         let mut buffer = text.to_string();
-        let draw = |ui: &mut egui::Ui| {
+        let mut draw = |ui: &mut egui::Ui| {
             if virtualized {
                 editor.show(ui, font.clone());
             } else {
