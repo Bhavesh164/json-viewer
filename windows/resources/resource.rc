@@ -1,4 +1,5 @@
 1 ICON "AppIcon.ico"
+1 24 "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,0,0
@@ -17,6 +18,7 @@ BEGIN
             VALUE "FileDescription", "JSON Viewer and Formatter for Windows"
             VALUE "FileVersion", "1.0.0"
             VALUE "InternalName", "jsonviewer"
+            VALUE "LegalCopyright", "Copyright (c) 2026 JSON Viewer"
             VALUE "OriginalFilename", "jsonviewer.exe"
             VALUE "ProductName", "JSON Viewer"
             VALUE "ProductVersion", "1.0.0"

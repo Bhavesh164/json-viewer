@@ -11,6 +11,7 @@ pub enum ParseError {
     InvalidKey(usize),
     ExpectedColon(usize),
     UnmatchedBracket(char, usize),
+    TrailingContent(usize),
 }
 
 impl std::fmt::Display for ParseError {
@@ -21,6 +22,7 @@ impl std::fmt::Display for ParseError {
             ParseError::InvalidKey(pos) => write!(f, "Expected dictionary key string or identifier at offset {}.", pos),
             ParseError::ExpectedColon(pos) => write!(f, "Expected ':' after dictionary key at offset {}.", pos),
             ParseError::UnmatchedBracket(ch, pos) => write!(f, "Unmatched bracket '{}' at offset {}.", ch, pos),
+            ParseError::TrailingContent(pos) => write!(f, "Unexpected content after Python literal at offset {}.", pos),
         }
     }
 }
@@ -323,5 +325,36 @@ pub fn parse_python_literal(text: &str) -> Result<JSONValue, ParseError> {
     }
     let val = parser.parse_value()?;
     parser.skip_ws_and_comments();
+    // A literal is exactly one value. Without this check `parse_value`
+    // accepted any text whose first token was a bare word (`x` plus pages of
+    // junk would parse as the string "x"), which also made trailing garbage
+    // after a JSON object look valid.
+    if parser.has_more() {
+        return Err(ParseError::TrailingContent(parser.offset));
+    }
     Ok(val)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_python_literals_and_assignment_prefixes() {
+        let value = parse_python_literal("data: dict = {'a': True, 'b': None,}").unwrap();
+        let JSONValue::Object(pairs) = value else {
+            panic!("expected an object");
+        };
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].key, "a");
+        assert_eq!(pairs[1].key, "b");
+    }
+
+    #[test]
+    fn rejects_trailing_content_after_a_literal() {
+        assert!(parse_python_literal(r#"{"a": 1}x"#).is_err());
+        assert!(parse_python_literal("x\nthis is not a literal").is_err());
+        // Trailing whitespace and comments are still allowed.
+        assert!(parse_python_literal("{'a': 1}  # done\n").is_ok());
+    }
 }

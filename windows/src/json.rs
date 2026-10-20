@@ -36,29 +36,6 @@ impl JSONValue {
             JSONValue::Object(_) => "object",
         }
     }
-
-    pub fn is_container(&self) -> bool {
-        matches!(self, JSONValue::Object(_) | JSONValue::Array(_))
-    }
-
-    pub fn child_count(&self) -> usize {
-        match self {
-            JSONValue::Object(p) => p.len(),
-            JSONValue::Array(a) => a.len(),
-            _ => 0,
-        }
-    }
-
-    pub fn summary(&self) -> String {
-        match self {
-            JSONValue::Null => "null".to_string(),
-            JSONValue::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
-            JSONValue::Number(_, raw) => raw.clone(),
-            JSONValue::Str(s) => format!("\"{}\"", s),
-            JSONValue::Array(items) => format!("Array [{}]", items.len()),
-            JSONValue::Object(pairs) => format!("Object {{{}}}", pairs.len()),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

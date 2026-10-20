@@ -5,7 +5,7 @@
 
 use crate::clipboard;
 use crate::json::JSONParser;
-use crate::model::{flatten, AppTab, DocumentModel, FlatRow, PropertyRow};
+use crate::model::{flatten, AppTab, DocumentModel, FlatRow, ParentInfo, PropertyRow};
 use crate::python::parse_python_literal;
 use crate::settings::{Settings, SettingsStore};
 use crate::settings_dialog::{self, SettingsContext};
@@ -33,12 +33,14 @@ use windows::Win32::UI::Controls::{
     LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
     ODS_DISABLED, ODS_FOCUS, ODS_SELECTED, SetWindowTheme,
     TVHITTESTINFO, TVHT_ONITEM, TVINSERTSTRUCTW, TVM_DELETEITEM, TVM_ENSUREVISIBLE, TVM_EXPAND,
-    TVM_GETNEXTITEM, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR, TVM_SETLINECOLOR,
-    TVM_SETTEXTCOLOR, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVIF_TEXT, TVI_LAST, TVI_ROOT,
+    TVM_GETNEXTITEM, TVM_HITTEST, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETBKCOLOR,
+    TVM_SETLINECOLOR, TVM_SETTEXTCOLOR, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVGN_CHILD,
+    TVGN_FIRSTVISIBLE, TVGN_NEXT, TVIF_TEXT, TVI_LAST, TVI_ROOT,
     TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES,
     TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_LISTVIEW, WC_TREEVIEW, LVN_ITEMCHANGED, NM_CLICK,
-    TVN_SELCHANGEDW, NMTREEVIEWW, NMITEMACTIVATE, NM_CUSTOMDRAW, NMTVCUSTOMDRAW,
-    CDDS_PREPAINT, CDDS_ITEMPREPAINT, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW,
+    TVN_SELCHANGEDW, TVN_ITEMEXPANDEDW, NMTREEVIEWW, NMITEMACTIVATE, NM_CUSTOMDRAW, NMTVCUSTOMDRAW,
+    NMLVCUSTOMDRAW, CDDS_PREPAINT, CDDS_ITEMPREPAINT, CDDS_SUBITEM,
+    CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW,
     CDIS_SELECTED,
 };
 use windows::Win32::UI::Controls::Dialogs::{
@@ -46,7 +48,7 @@ use windows::Win32::UI::Controls::Dialogs::{
     OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
 };
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     ACCEL, AppendMenuW,BN_CLICKED, CallWindowProcW, CreateAcceleratorTableW, CreateMenu,
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
@@ -63,9 +65,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP, WS_VSCROLL, ES_AUTOHSCROLL,
     ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, ES_READONLY, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
     WM_COPY, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_CUT, WM_DESTROY, WM_DRAWITEM, WM_NOTIFY,
-    WM_PASTE, WM_SETFONT, WM_SIZE, WM_TIMER, WM_USER, WM_CHAR,
+    WM_PASTE, WM_SETFONT, WM_SIZE, WM_TIMER, WM_USER, WM_CHAR, WM_DROPFILES,
     WM_CLOSE, WM_NCDESTROY, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 
 // Control IDs — Row 1: tab switcher (left) + utilities (right)
 const IDC_TAB_VIEWER: u32 = 101;
@@ -98,6 +101,11 @@ const IDC_SEARCH_GO: u32 = 212;
 const IDC_SEARCH_PREV: u32 = 213;
 const IDC_SEARCH_NEXT: u32 = 214;
 const IDC_SEARCH_STATUS: u32 = 215;
+const IDC_PROPS_TITLE: u32 = 216;
+const IDC_PROPS_PARENT: u32 = 217;
+const IDC_PROPS_FILTER: u32 = 218;
+const IDC_PROPS_COUNT: u32 = 219;
+const IDC_PROPS_FILTER_LABEL: u32 = 222;
 const IDC_STATUS: u32 = 220;
 const IDC_PATH: u32 = 221;
 // Inline expand panel (macOS parity: full-width wrapped text below the tree,
@@ -145,6 +153,8 @@ const IDM_CTX_EXPAND_TEXT: u32 = 1608;
 const WM_APP_SETTINGS_CHANGED: u32 = WM_USER + 101;
 const TIMER_LIVE_PARSE: usize = 1;
 const TIMER_FILL: usize = 2;
+/// Polls the background search worker and applies its results.
+const TIMER_SEARCH: usize = 3;
 /// Tree rows per timer tick — keeps the UI responsive while huge files load.
 /// Each tick is wrapped in WM_SETREDRAW off/on (see `fill_tick`) so 4000
 /// inserts cost one repaint instead of 4000. Benchmarks: 204k nodes from a
@@ -160,6 +170,8 @@ const LARGE_FILE_BYTES: usize = 1_000_000;
 /// EM_SETLIMITTEXT (0x00C5): default EDIT limit is 32KB of typed text.
 /// Without raising it, large pastes/types beyond 32KB are silently blocked.
 const EM_SETLIMITTEXT: u32 = 0x00C5;
+/// EM_SETCUEBANNER (comctl32 v6): placeholder text in an empty EDIT control.
+const EM_SETCUEBANNER: u32 = 0x1501;
 /// Max editor text (64MB UTF-16 units) — well above 5MB test files.
 const EDIT_TEXT_LIMIT: usize = 64 * 1024 * 1024;
 /// STATIC style: vertically center single-line text in its rect, so labels
@@ -173,11 +185,26 @@ const DARK_TEXT: u32 = 0xD4D4D4;
 const DARK_DIM_TEXT: u32 = 0x858585;
 const DARK_BORDER: u32 = 0x3F3F46;
 const DARK_BTN: u32 = 0x2D2D2D;
-const DARK_BTN_DOWN: u32 = 0x094771;
-const DARK_ACCENT_BG: u32 = 0x094771;
+const DARK_BTN_DOWN: u32 = 0x00714709; // #094771 in COLORREF byte order
+const DARK_ACCENT_BG: u32 = 0x00714709;
 // Search matches (non-current): bright yellow text on the dark row, like the
 // mac yellow MATCH badge — distinct from the brown selection background.
 const SEARCH_MATCH_TEXT: u32 = 0x0000FFFF; // COLORREF 0x00BBGGRR: R=FF G=FF B=00
+
+/// Per-type row/value colors (VS Code dark palette, converted to COLORREF's
+/// 0x00BBGGRR byte order). Makes the tree and property grid scannable at a
+/// glance without relying on the Type column alone.
+fn type_color(type_name: &str) -> u32 {
+    match type_name {
+        "string" => 0x007891CE,  // #CE9178
+        "number" => 0x00A8CEB5,  // #B5CEA8
+        "boolean" => 0x00D69C56, // #569CD6
+        "null" => 0x00808080,    // #808080
+        "array" => 0x00AAAADC,   // #DCDCAA
+        "object" => 0x00B0C94E,  // #4EC9B0
+        _ => DARK_TEXT,
+    }
+}
 
 static mut APP_PTR: usize = 0;
 /// Original search-edit proc. Global (not via `app_of`) so the subclass can
@@ -245,16 +272,22 @@ struct Controls {
     search_status: HWND,
     status: HWND,
     path: HWND,
+    // Property inspector header: title + parent jump + in-grid filter.
+    prop_title: HWND,
+    prop_parent: HWND,
+    prop_filter_label: HWND,
+    prop_filter: HWND,
+    prop_count: HWND,
 }
 
 struct CreateParams {
     settings: Arc<Mutex<Settings>>,
     store: Arc<Mutex<SettingsStore>>,
+    initial_file: Option<std::path::PathBuf>,
 }
 
 struct App {
     hwnd: HWND,
-    instance: HINSTANCE,
     settings: Arc<Mutex<Settings>>,
     store: Arc<Mutex<SettingsStore>>,
     model: DocumentModel,
@@ -263,11 +296,23 @@ struct App {
     font_ui: HFONT,
     brush_edit: windows::Win32::Graphics::Gdi::HBRUSH,
     brush_chrome: windows::Win32::Graphics::Gdi::HBRUSH,
-    item_to_path: HashMap<isize, String>,
-    path_to_item: HashMap<String, isize>,
+    item_to_id: HashMap<isize, String>,
+    id_to_item: HashMap<String, isize>,
+    /// Row colours for the native TreeView custom draw.
+    item_type: HashMap<isize, &'static str>,
     container_items: Vec<isize>,
+    /// Container IDs expanded in the native tree. Captured on
+    /// TVN_ITEMEXPANDED and re-applied after a tree rebuild so Split-mode
+    /// parsing does not collapse the user's branches.
+    expanded_ids: HashSet<String>,
     grid_rows: Vec<PropertyRow>,
+    grid_parent: Option<ParentInfo>,
     grid_truncated: Option<usize>,
+    grid_total: usize,
+    prop_filter: String,
+    /// True while we programmatically rewrite the filter edit, so its
+    /// EN_CHANGE does not rebuild the grid again.
+    syncing_filter: bool,
     syncing_editor: bool,
     /// True while we (not the user) change grid selection — stops the
     /// resulting LVN_ITEMCHANGED from re-entering the click handler and
@@ -282,16 +327,21 @@ struct App {
     /// fill from a cancelled load). Needed so tab switches don't leave a
     /// half-filled tree.
     tree_complete: bool,
+    /// True while the editor text differs from the tree currently shown (or
+    /// the latest parse failed). Split mode keeps the last good tree visible
+    /// and surfaces this as a status-bar warning so copied values are not
+    /// mistaken for fresh ones.
+    tree_stale: bool,
     /// Expand-all requested while a fill is running — applied on completion.
     expand_on_fill_done: bool,
-    /// Tree path right-clicked for the context menu.
-    ctx_path: Option<String>,
+    /// Tree node ID right-clicked for the context menu.
+    ctx_id: Option<String>,
     /// Inline expand panel state (macOS expanded big-text parity).
-    /// `expand_visible == false` means collapsed; `expand_path` is the leaf
-    /// whose full text the panel shows (== selected path when visible).
+    /// `expand_visible == false` means collapsed; `expand_id` is the leaf
+    /// whose full text the panel shows (== selected node when visible).
     expand_visible: bool,
-    expand_path: Option<String>,
-    /// All current search-match paths (mirrors `model.search_results` for
+    expand_id: Option<String>,
+    /// All current search-match IDs (mirrors `model.search_results` for
     /// O(1) custom-draw lookup). Painted yellow; the current match gets the
     /// brown selection background like a manual click.
     search_marks: HashSet<String>,
@@ -417,6 +467,11 @@ fn apply_font_to_controls(app: &App) {
         app.ctrl.expand_label,
         app.ctrl.expand_copy,
         app.ctrl.expand_collapse,
+        app.ctrl.prop_parent,
+        app.ctrl.prop_filter_label,
+        app.ctrl.prop_filter,
+        app.ctrl.prop_title,
+        app.ctrl.prop_count,
     ] {
         set_font(h, app.font_ui);
     }
@@ -595,15 +650,13 @@ fn draw_button(app: &App, di: &DRAWITEMSTRUCT) {
 // ---------------- tree / grid ----------------
 
 fn tree_insert_raw(tree: HWND, parent: isize, after: isize, text: &str) -> isize {
-    unsafe {
-        let w = wide(text);
-        let mut item = TVINSERTSTRUCTW::default();
-        item.hParent = windows::Win32::UI::Controls::HTREEITEM(parent);
-        item.hInsertAfter = windows::Win32::UI::Controls::HTREEITEM(after);
-        item.Anonymous.itemex.mask = TVIF_TEXT;
-        item.Anonymous.itemex.pszText = windows::core::PWSTR(w.as_ptr() as *mut u16);
-        send(tree, TVM_INSERTITEMW, 0, &item as *const _ as isize)
-    }
+    let w = wide(text);
+    let mut item = TVINSERTSTRUCTW::default();
+    item.hParent = windows::Win32::UI::Controls::HTREEITEM(parent);
+    item.hInsertAfter = windows::Win32::UI::Controls::HTREEITEM(after);
+    item.Anonymous.itemex.mask = TVIF_TEXT;
+    item.Anonymous.itemex.pszText = windows::core::PWSTR(w.as_ptr() as *mut u16);
+    send(tree, TVM_INSERTITEMW, 0, &item as *const _ as isize)
 }
 
 fn tree_expand_by_hwnd(tree: HWND, item: isize, expand: bool) {
@@ -618,15 +671,32 @@ fn tree_expand(app: &App, item: isize, expand: bool) {
 /// on a timer so the UI never freezes — even with tens of thousands of
 /// nodes the window stays responsive and shows progress. Small trees fill
 /// synchronously and feel instant.
-fn begin_tree_fill(app: &mut App) {
+///
+/// `preserve_nav` keeps the user's expanded branches and selection. It is true
+/// for Split-mode re-parses and false for Open / Clear / a new document.
+fn begin_tree_fill(app: &mut App, preserve_nav: bool) {
     cancel_tree_fill(app);
+    // A fresh tree supersedes any background search started against the old
+    // one (the model already cancelled it during parsing).
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(app.hwnd, TIMER_SEARCH);
+    }
+    app.tree_stale = false;
     app.tree_complete = false;
+    if !preserve_nav {
+        app.expanded_ids.clear();
+        app.prop_filter.clear();
+        app.syncing_filter = true;
+        unsafe { set_window_text(app.ctrl.prop_filter, ""); }
+        app.syncing_filter = false;
+    }
     // New tree → stale inline-expand selection is meaningless; hide panel.
     app.expand_visible = false;
-    app.expand_path = None;
+    app.expand_id = None;
     send(app.ctrl.tree, TVM_DELETEITEM, 0, TVI_ROOT.0 as isize);
-    app.item_to_path.clear();
-    app.path_to_item.clear();
+    app.item_to_id.clear();
+    app.id_to_item.clear();
+    app.item_type.clear();
     app.container_items.clear();
     // Keep search highlights consistent with the model (Clear empties them;
     // re-parse of the same doc preserves them for incoming rows).
@@ -636,6 +706,7 @@ fn begin_tree_fill(app: &mut App) {
     send(app.ctrl.grid, LVM_DELETEALLITEMS, 0, 0);
     app.grid_rows.clear();
     app.grid_truncated = None;
+    app.grid_total = 0;
     let root = match app.model.root.as_ref() {
         Some(r) => r,
         None => {
@@ -646,7 +717,7 @@ fn begin_tree_fill(app: &mut App) {
         }
     };
     // Flatten first (fast, no Win32 calls), then insert in slices.
-    let rows = flatten(root);
+    let rows = flatten(root.as_ref());
     let total = rows.len();
     if total == 0 {
         app.tree_complete = true;
@@ -701,8 +772,9 @@ fn fill_tick(app: &mut App) -> bool {
         // while inserting tens of thousands of nodes.
         if fill.next == 0 {
             let cap = fill.rows.len();
-            app.item_to_path.reserve(cap);
-            app.path_to_item.reserve(cap);
+            app.item_to_id.reserve(cap);
+            app.id_to_item.reserve(cap);
+            app.item_type.reserve(cap);
             app.container_items.reserve(cap / 4);
         }
         while fill.next < end {
@@ -715,8 +787,9 @@ fn fill_tick(app: &mut App) -> bool {
             let parent = fill.stack.last().map(|(_, it)| *it).unwrap_or(TVI_ROOT.0 as isize);
             let item = tree_insert_raw(tree, parent, TVI_LAST.0 as isize, &row.label);
             if item != 0 {
-                app.item_to_path.insert(item, row.path.clone());
-                app.path_to_item.insert(row.path.clone(), item);
+                app.item_to_id.insert(item, row.id.clone());
+                app.id_to_item.insert(row.id.clone(), item);
+                app.item_type.insert(item, row.type_name);
                 if row.is_container {
                     app.container_items.push(item);
                     fill.stack.push((row.depth, item));
@@ -733,18 +806,36 @@ fn fill_tick(app: &mut App) -> bool {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(app.hwnd, TIMER_FILL);
         }
-        // Default: only root expanded (classic JSON Viewer look).
-        if let Some(&root_item) = app.path_to_item.get("$") {
+        // Default: only root expanded (classic JSON Viewer look). Re-apply
+        // every branch the user had open before a Split-mode rebuild. IDs that
+        // no longer exist after the parse are dropped so they cannot leak
+        // into future documents.
+        if let Some(&root_item) = app.id_to_item.get("$") {
             tree_expand_by_hwnd(tree, root_item, true);
+        }
+        app.expanded_ids
+            .retain(|id| id == "$" || app.id_to_item.contains_key(id));
+        let restore: Vec<String> = app.expanded_ids.iter().cloned().collect();
+        for id in restore {
+            if id == "$" {
+                continue;
+            }
+            if let Some(&item) = app.id_to_item.get(&id) {
+                tree_expand_by_hwnd(tree, item, true);
+            }
         }
         if app.expand_on_fill_done {
             app.expand_on_fill_done = false;
             expand_all(app);
         }
-        if let Some(sel) = app.model.selected_path.clone() {
-            reveal_path(app, &sel, false);
+        if let Some(sel) = app.model.selected_id.clone() {
+            reveal_id(app, &sel, false);
         }
         refresh_grid(app);
+        // Split-mode re-parses rebuild the tree from scratch; restore the
+        // inline long-text panel for the re-selected node and its layout.
+        refresh_expand_panel(app);
+        layout(app);
         refresh_status(app);
         true
     } else {
@@ -758,33 +849,25 @@ fn fill_tick(app: &mut App) -> bool {
     }
 }
 
-/// Select `path` in the tree, expanding ancestors first (search results,
+/// Select `id` in the tree, expanding ancestors first (search results,
 /// property-grid jumps, restored selection).
-fn reveal_path(app: &mut App, path: &str, ensure_visible: bool) {
+fn reveal_id(app: &mut App, id: &str, ensure_visible: bool) {
     let ancestors = app
         .model
-        .find_with_ancestors(path)
+        .find_with_ancestors(id)
         .map(|(a, _)| a)
         .unwrap_or_default();
     for a in &ancestors {
-        if let Some(&ai) = app.path_to_item.get(a) {
+        if let Some(&ai) = app.id_to_item.get(a) {
             tree_expand_by_hwnd(app.ctrl.tree, ai, true);
         }
     }
-    if let Some(&item) = app.path_to_item.get(path) {
+    if let Some(&item) = app.id_to_item.get(id) {
         send(app.ctrl.tree, TVM_SELECTITEM, TVGN_CARET as usize, item);
         if ensure_visible {
             send(app.ctrl.tree, TVM_ENSUREVISIBLE, 0, item);
         }
     }
-}
-
-fn selected_tree_path(app: &App) -> Option<String> {
-    let caret = send(app.ctrl.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0);
-    if caret == 0 {
-        return None;
-    }
-    app.item_to_path.get(&(caret as isize)).cloned()
 }
 
 fn expand_all(app: &App) {
@@ -797,7 +880,7 @@ fn expand_all(app: &App) {
 
 fn collapse_all(app: &App) {
     set_redraw(app.ctrl.tree, false);
-    let root = app.path_to_item.get("$").copied();
+    let root = app.id_to_item.get("$").copied();
     for i in 0..app.container_items.len() {
         let it = app.container_items[i];
         if Some(it) != root {
@@ -811,41 +894,94 @@ fn collapse_all(app: &App) {
 }
 
 fn refresh_grid(app: &mut App) {
+    app.syncing_grid = true;
     set_redraw(app.ctrl.grid, false);
     send(app.ctrl.grid, LVM_DELETEALLITEMS, 0, 0);
-    let mut rows = app.model.properties_for_selected();
+
+    // Cap while the model builds the rows: a root array of 200k values should
+    // not allocate 200k display strings just to show the first 10k.
+    let (parent, total, all) = app.model.properties_for_selected_limited(GRID_CAP);
+    app.grid_parent = parent;
+    app.grid_total = total;
+
+    let q = app.prop_filter.to_lowercase();
+    let mut rows: Vec<PropertyRow> = if q.is_empty() {
+        all
+    } else {
+        all.into_iter()
+            .filter(|r| {
+                r.name.to_lowercase().contains(&q)
+                    || r.value.to_lowercase().contains(&q)
+                    || r.typ.to_lowercase().contains(&q)
+            })
+            .collect()
+    };
     // The ListView is not virtualized: cap pathological selections so the UI
     // can never freeze, and say so in the status bar.
-    let total = rows.len();
-    if total > GRID_CAP {
+    app.grid_truncated = if total > GRID_CAP { Some(total) } else { None };
+    if rows.len() > GRID_CAP {
         rows.truncate(GRID_CAP);
     }
-    app.grid_truncated = if total > GRID_CAP { Some(total) } else { None };
     app.grid_rows = rows.clone();
-    for (i, row) in rows.iter().enumerate() {
-        unsafe {
-            let name = wide(&row.name);
-            let mut item = LVITEMW::default();
-            item.mask = LVIF_TEXT;
-            item.iItem = i as i32;
-            item.iSubItem = 0;
-            item.pszText = windows::core::PWSTR(name.as_ptr() as *mut u16);
-            send(app.ctrl.grid, LVM_INSERTITEMW, 0, &item as *const _ as isize);
-            let value = wide(&row.value);
-            let mut sub = LVITEMW::default();
-            sub.iItem = i as i32;
-            sub.iSubItem = 1;
-            sub.pszText = windows::core::PWSTR(value.as_ptr() as *mut u16);
-            send(app.ctrl.grid, LVM_SETITEMTEXTW, i, &sub as *const _ as isize);
-            let typ = wide(&row.typ);
-            let mut sub2 = LVITEMW::default();
-            sub2.iItem = i as i32;
-            sub2.iSubItem = 2;
-            sub2.pszText = windows::core::PWSTR(typ.as_ptr() as *mut u16);
-            send(app.ctrl.grid, LVM_SETITEMTEXTW, i, &sub2 as *const _ as isize);
+
+    // Header: selected node name, "← Parent" jump, filter, item count.
+    let title = match app.model.selected_node() {
+        Some(sel) if sel.path == "$" => "JSON (Root)".to_string(),
+        Some(sel) if sel.is_container() => sel.key.clone(),
+        Some(sel) => sel.key.clone(),
+        None => "JSON".to_string(),
+    };
+    unsafe {
+        set_window_text(app.ctrl.prop_title, &format!("Properties  |  {}", title));
+        set_window_text(
+            app.ctrl.prop_count,
+            &if q.is_empty() {
+                format!("{} items", total)
+            } else {
+                format!("{} of {} items", rows.len(), total)
+            },
+        );
+        match &app.grid_parent {
+            Some(parent) => {
+                let label = if parent.path == "$" { "← Root" } else { "← Parent" };
+                set_window_text(app.ctrl.prop_parent, label);
+                let _ = EnableWindow(app.ctrl.prop_parent, BOOL(1));
+            }
+            None => {
+                set_window_text(app.ctrl.prop_parent, "← Parent");
+                let _ = EnableWindow(app.ctrl.prop_parent, BOOL(0));
+            }
         }
+        let _ = ShowWindow(app.ctrl.prop_parent, SW_SHOW);
+        let _ = ShowWindow(app.ctrl.prop_title, SW_SHOW);
+        let _ = ShowWindow(app.ctrl.prop_count, SW_SHOW);
+        let _ = ShowWindow(app.ctrl.prop_filter_label, SW_SHOW);
+        let _ = ShowWindow(app.ctrl.prop_filter, SW_SHOW);
+    }
+
+    for (i, row) in rows.iter().enumerate() {
+        let name = wide(&row.name);
+        let mut item = LVITEMW::default();
+        item.mask = LVIF_TEXT;
+        item.iItem = i as i32;
+        item.iSubItem = 0;
+        item.pszText = windows::core::PWSTR(name.as_ptr() as *mut u16);
+        send(app.ctrl.grid, LVM_INSERTITEMW, 0, &item as *const _ as isize);
+        let value = wide(&row.value);
+        let mut sub = LVITEMW::default();
+        sub.iItem = i as i32;
+        sub.iSubItem = 1;
+        sub.pszText = windows::core::PWSTR(value.as_ptr() as *mut u16);
+        send(app.ctrl.grid, LVM_SETITEMTEXTW, i, &sub as *const _ as isize);
+        let typ = wide(&row.typ);
+        let mut sub2 = LVITEMW::default();
+        sub2.iItem = i as i32;
+        sub2.iSubItem = 2;
+        sub2.pszText = windows::core::PWSTR(typ.as_ptr() as *mut u16);
+        send(app.ctrl.grid, LVM_SETITEMTEXTW, i, &sub2 as *const _ as isize);
     }
     set_redraw(app.ctrl.grid, true);
+    app.syncing_grid = false;
 }
 
 /// Size the 3 grid columns to exactly fill the grid client width, so no
@@ -879,8 +1015,8 @@ fn resize_grid_columns(app: &App) {
 
 /// Currently selected long-text leaf, if any: (key, full_value).
 fn selected_long_text(app: &App) -> Option<(String, String)> {
-    let path = app.model.selected_path.as_ref()?;
-    let node = app.model.find_node(path)?;
+    let id = app.model.selected_id.as_ref()?;
+    let node = app.model.find_node(id)?;
     match &node.value {
         crate::json::JSONValue::Str(s) if node.is_long_text() => {
             Some((node.key.clone(), s.clone()))
@@ -907,7 +1043,7 @@ fn expand_should_show(app: &App) -> bool {
     if !app.expand_visible {
         return false;
     }
-    match (&app.expand_path, &app.model.selected_path) {
+    match (&app.expand_id, &app.model.selected_id) {
         (Some(ep), Some(sel)) if ep == sel => selected_long_text(app).is_some(),
         _ => false,
     }
@@ -919,14 +1055,14 @@ fn refresh_expand_panel(app: &mut App) {
     if matches!(app.model.active_tab, AppTab::Text) {
         return;
     }
-    let sel = app.model.selected_path.clone();
+    let sel = app.model.selected_id.clone();
     let long = selected_long_text(app);
     match (sel, long) {
         (Some(p), Some((k, full))) => {
-            if app.expand_path.as_ref() != Some(&p) {
+            if app.expand_id.as_ref() != Some(&p) {
                 // New long node selected → auto-expand inline (mac parity:
                 // the full-width text appears without opening anything).
-                app.expand_path = Some(p);
+                app.expand_id = Some(p);
                 app.expand_visible = true;
             }
             let (header, _) = expand_header_text(&k, &full);
@@ -942,11 +1078,11 @@ fn refresh_expand_panel(app: &mut App) {
     }
 }
 
-fn show_expand_inline(app: &mut App, path: String) {
-    app.expand_path = Some(path.clone());
+fn show_expand_inline(app: &mut App, id: String) {
+    app.expand_id = Some(id.clone());
     app.expand_visible = true;
-    app.model.selected_path = Some(path.clone());
-    if let Some(n) = app.model.find_node(&path) {
+    app.model.selected_id = Some(id.clone());
+    if let Some(n) = app.model.find_node(&id) {
         if let crate::json::JSONValue::Str(s) = &n.value {
             let (header, _) = expand_header_text(&n.key, s);
             let full = s.clone();
@@ -964,17 +1100,17 @@ fn hide_expand_inline(app: &mut App) {
     layout(app);
 }
 
-fn toggle_expand_inline(app: &mut App, path: String) {
-    if app.expand_visible && app.expand_path.as_ref() == Some(&path) {
+fn toggle_expand_inline(app: &mut App, id: String) {
+    if app.expand_visible && app.expand_id.as_ref() == Some(&id) {
         hide_expand_inline(app);
     } else {
-        show_expand_inline(app, path);
+        show_expand_inline(app, id);
     }
 }
 
 fn copy_expand_text(app: &App) {
     let full: Option<String> = app
-        .expand_path
+        .expand_id
         .as_ref()
         .and_then(|p| app.model.find_node(p))
         .and_then(|n| match &n.value {
@@ -1008,11 +1144,25 @@ fn sync_search_marks(app: &mut App) {
 fn ensure_selected_visible(app: &App) {
     let item = app
         .model
-        .selected_path
+        .selected_id
         .as_ref()
-        .and_then(|p| app.path_to_item.get(p).copied());
+        .and_then(|id| app.id_to_item.get(id).copied());
     if let Some(it) = item {
         send(app.ctrl.tree, TVM_ENSUREVISIBLE, 0, it);
+    }
+}
+
+/// Put the tree viewport back at the root (used when clearing search, mirroring
+/// the macOS/Linux behavior).
+fn scroll_tree_to_root(app: &App) {
+    if let Some(&root) = app.id_to_item.get("$") {
+        tree_expand_by_hwnd(app.ctrl.tree, root, true);
+        send(
+            app.ctrl.tree,
+            TVM_SELECTITEM,
+            TVGN_FIRSTVISIBLE as usize,
+            root,
+        );
     }
 }
 
@@ -1023,14 +1173,36 @@ fn clear_search_marks_and_repaint(app: &mut App) {
     }
 }
 
+/// Clear search state and return both the box and the tree viewport to root.
+fn clear_search_ui(app: &mut App) {
+    app.model.clear_search();
+    clear_search_marks_and_repaint(app);
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(app.hwnd, TIMER_SEARCH);
+        set_window_text(app.ctrl.search_edit, "");
+    }
+    scroll_tree_to_root(app);
+    refresh_status(app);
+}
+
 fn refresh_status(app: &App) {
     unsafe {
         let mut text = format!("{}    |    {}", app.model.status_text(), app.model.metrics_text());
+        if app.tree_stale && app.model.root.is_some() {
+            text.push_str("    |    Tree out of date — press Refresh to update");
+        }
+        if !app.prop_filter.is_empty() {
+            text.push_str(&format!(
+                "    |    properties: {} of {} match the filter",
+                app.grid_rows.len(),
+                app.grid_total
+            ));
+        }
         if let Some(total) = app.grid_truncated {
             text.push_str(&format!("    |    grid shows first {} of {} properties", GRID_CAP, total));
         }
         set_window_text(app.ctrl.status, &text);
-        let path = app.model.selected_path.clone().unwrap_or_default();
+        let path = app.model.selected_path().unwrap_or_default();
         set_window_text(app.ctrl.path, &path);
         set_window_text(app.ctrl.search_status, &app.model.search_status);
     }
@@ -1072,6 +1244,12 @@ fn pull_editor_text(app: &mut App) -> bool {
         if text != app.model.raw_text {
             app.model.raw_text = text;
             app.model.mark_edited();
+            // Split shows the previous tree while the editor holds text we
+            // have not parsed yet (or cannot parse). Flag it as stale until a
+            // successful parse lands.
+            if matches!(app.model.active_tab, AppTab::Split) && app.model.root.is_some() {
+                app.tree_stale = true;
+            }
             true
         } else {
             false
@@ -1086,9 +1264,12 @@ fn parse_and_view(app: &mut App, silent: bool) -> bool {
     pull_editor_text(app);
     let ok = app.model.parse_and_build_tree(silent, &settings);
     if ok {
-        begin_tree_fill(app);
+        app.tree_stale = false;
+        begin_tree_fill(app, true);
     } else {
-        cancel_tree_fill(app);
+        // Keep the last successfully parsed tree visible while the editor is
+        // invalid (macOS split-mode parity), but make the stale state obvious.
+        app.tree_stale = app.model.root.is_some();
         if !silent && !app.model.error_message.is_empty() {
             let msg = app.model.error_message.clone();
             show_error(app.hwnd, &msg);
@@ -1101,11 +1282,15 @@ fn parse_and_view(app: &mut App, silent: bool) -> bool {
 /// Refill the tree when the model already parsed (transforms/paste/open call
 /// `parse_and_build_tree` internally). Calling `parse_and_view` here would
 /// parse the same 5MB text a second time (~300ms wasted) and freeze typing.
-fn refill_tree_after_model_change(app: &mut App) {
+/// `preserve_nav` keeps the selected node and expanded branches (Split mode)
+/// instead of collapsing everything for a new document.
+fn refill_tree_after_model_change(app: &mut App, preserve_nav: bool) {
     if app.model.root.is_some() {
-        begin_tree_fill(app);
+        app.tree_stale = false;
+        begin_tree_fill(app, preserve_nav);
     } else {
         cancel_tree_fill(app);
+        app.tree_stale = false;
         app.tree_complete = true;
         refresh_status(app);
     }
@@ -1142,7 +1327,7 @@ fn do_paste(app: &mut App) {
         let settings = app.settings.lock().unwrap().clone();
         let res = app.model.paste(&text, &settings);
         refresh_editor(app);
-        refill_tree_after_model_change(app);
+        refill_tree_after_model_change(app, false);
         if res == "converted-python" {
             unsafe { set_window_text(app.ctrl.status, "Converted Python Dictionary to JSON!"); }
         }
@@ -1173,7 +1358,7 @@ fn do_transform(app: &mut App, kind: &str) {
             if kind == "j2p" {
                 parse_and_view(app, true);
             } else {
-                refill_tree_after_model_change(app);
+                refill_tree_after_model_change(app, true);
             }
             if !label.is_empty() {
                 unsafe { set_window_text(app.ctrl.status, label); }
@@ -1192,7 +1377,7 @@ fn do_stringify(app: &mut App) {
     let settings = app.settings.lock().unwrap().clone();
     app.model.stringify(&settings);
     refresh_editor(app);
-    refill_tree_after_model_change(app);
+    refill_tree_after_model_change(app, true);
     unsafe { set_window_text(app.ctrl.status, "Stringified JSON"); }
 }
 
@@ -1205,7 +1390,7 @@ fn do_unescape(app: &mut App) {
     let settings = app.settings.lock().unwrap().clone();
     app.model.unescape(&settings);
     refresh_editor(app);
-    refill_tree_after_model_change(app);
+    refill_tree_after_model_change(app, true);
     unsafe { set_window_text(app.ctrl.status, "Unescaped JSON"); }
 }
 
@@ -1229,8 +1414,15 @@ fn do_open(app: &mut App) {
             let settings = app.settings.lock().unwrap().clone();
             match app.model.load_file(std::path::Path::new(&path), &settings) {
                 Ok(_) => {
+                    if let Some(name) = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                    {
+                        set_window_text(app.hwnd, &format!("JSON Viewer — {}", name));
+                    }
                     refresh_editor(app);
-                    refill_tree_after_model_change(app);
+                    app.expanded_ids.clear();
+                    refill_tree_after_model_change(app, false);
                 }
                 Err(e) => show_error(app.hwnd, &e),
             }
@@ -1271,6 +1463,34 @@ fn do_save(app: &mut App) {
     }
 }
 
+/// Reveal the model-selected node after a search / navigation jump.
+fn reveal_selected(app: &mut App, ensure_visible: bool) {
+    if let Some(id) = app.model.selected_id.clone() {
+        reveal_id(app, &id, ensure_visible);
+        refresh_grid(app);
+        refresh_expand_panel(app);
+        layout(app);
+        // Resize first, scroll second: layout can reset the TreeView scroll
+        // position, so ensuring before layout left the right node selected
+        // (grid/expand/status correct) but the tree still showing the top.
+        if ensure_visible {
+            ensure_selected_visible(app);
+        }
+    }
+}
+
+fn start_search_poll(app: &App) {
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(app.hwnd, TIMER_SEARCH, 40, None);
+    }
+}
+
+fn stop_search_poll(app: &App) {
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(app.hwnd, TIMER_SEARCH);
+    }
+}
+
 fn do_search(app: &mut App, dir: i32) {
     pull_editor_text(app);
     unsafe {
@@ -1278,26 +1498,44 @@ fn do_search(app: &mut App, dir: i32) {
         app.model.search_query = q;
     }
     let settings = app.settings.lock().unwrap().clone();
+    if app.model.search_query.trim().is_empty() {
+        clear_search_ui(app);
+        return;
+    }
     if dir == 0 {
-        // GO: fresh search
-        app.model.search_start(&settings);
+        // GO: fresh search on the cancellable background worker.
+        app.model.search_start(&settings, false);
     } else if dir > 0 {
         app.model.search_next(&settings);
     } else {
         app.model.search_previous(&settings);
     }
     sync_search_marks(app);
-    if let Some(sel) = app.model.selected_path.clone() {
-        reveal_path(app, &sel, true);
-        refresh_grid(app);
-        refresh_expand_panel(app);
-        layout(app);
-        // Resize first, scroll second: layout can reset the TreeView scroll
-        // position, so ensuring before layout left the right node selected
-        // (grid/expand/status correct) but the tree still showing the top.
-        ensure_selected_visible(app);
+    if app.model.search_in_flight {
+        start_search_poll(app);
+        refresh_status(app);
+    } else {
+        stop_search_poll(app);
+        reveal_selected(app, true);
+        refresh_status(app);
     }
+}
+
+/// Apply a completed background search (called from TIMER_SEARCH).
+fn apply_search_completion(app: &mut App) {
+    if !app.model.poll_search_results() {
+        if !app.model.search_in_flight {
+            stop_search_poll(app);
+            refresh_status(app);
+        }
+        return;
+    }
+    sync_search_marks(app);
+    reveal_selected(app, true);
     refresh_status(app);
+    if !app.model.search_in_flight {
+        stop_search_poll(app);
+    }
 }
 
 fn set_tab(app: &mut App, tab: AppTab) {
@@ -1312,7 +1550,7 @@ fn set_tab(app: &mut App, tab: AppTab) {
         } else if app.fill.is_some() {
             // A fill is already streaming — let it continue.
         } else if !app.tree_complete {
-            begin_tree_fill(app);
+            begin_tree_fill(app, true);
         }
     } else {
         // Tree hidden: stop any in-flight fill to save work.
@@ -1321,6 +1559,12 @@ fn set_tab(app: &mut App, tab: AppTab) {
     app.model.active_tab = tab;
     refresh_expand_panel(app);
     layout(app);
+    if matches!(tab, AppTab::Viewer | AppTab::Split) {
+        refresh_status(app);
+        if app.tree_complete {
+            ensure_selected_visible(app);
+        }
+    }
     // Repaint the tab buttons: owner-drawn highlight reads `active_tab` at
     // WM_DRAWITEM time, and moving/resizing alone doesn't always invalidate
     // them — without this the old tab keeps its accent (several tabs look
@@ -1363,7 +1607,7 @@ fn rebuild_font(app: &mut App) {
         app.font_mono = make_font("Consolas", size);
         apply_font_to_controls(app);
         if !old.is_invalid() {
-            DeleteObject(old);
+            let _ = DeleteObject(old);
         }
     }
 }
@@ -1395,6 +1639,91 @@ fn show_about(hwnd: HWND) {
 }
 
 // ---------------- layout ----------------
+
+/// Two compact rows above the property grid: title/count, then parent jump +
+/// filter. Returns the Y where the ListView itself should start.
+const PROP_HEADER_H: i32 = 56;
+
+fn layout_prop_header(app: &App, x: i32, y: i32, w: i32) -> i32 {
+    unsafe {
+        for h in [
+            app.ctrl.prop_title,
+            app.ctrl.prop_parent,
+            app.ctrl.prop_filter_label,
+            app.ctrl.prop_filter,
+            app.ctrl.prop_count,
+        ] {
+            let _ = ShowWindow(h, SW_SHOW);
+        }
+        let count_w = 78;
+        let title_w = (w - count_w - 6).max(60);
+        let _ = SetWindowPos(
+            app.ctrl.prop_title,
+            HWND(std::ptr::null_mut()),
+            x,
+            y,
+            title_w,
+            22,
+            SWP_NOZORDER,
+        );
+        let _ = SetWindowPos(
+            app.ctrl.prop_count,
+            HWND(std::ptr::null_mut()),
+            x + w - count_w,
+            y,
+            count_w,
+            22,
+            SWP_NOZORDER,
+        );
+
+        let parent_w = 84;
+        let label_w = 38;
+        let filter_w = (w - parent_w - label_w - 10).max(60);
+        let row_y = y + 26;
+        let _ = SetWindowPos(
+            app.ctrl.prop_parent,
+            HWND(std::ptr::null_mut()),
+            x,
+            row_y,
+            parent_w,
+            24,
+            SWP_NOZORDER,
+        );
+        let _ = SetWindowPos(
+            app.ctrl.prop_filter_label,
+            HWND(std::ptr::null_mut()),
+            x + parent_w + 4,
+            row_y,
+            label_w,
+            24,
+            SWP_NOZORDER,
+        );
+        let _ = SetWindowPos(
+            app.ctrl.prop_filter,
+            HWND(std::ptr::null_mut()),
+            x + parent_w + 4 + label_w,
+            row_y,
+            filter_w,
+            24,
+            SWP_NOZORDER,
+        );
+    }
+    y + PROP_HEADER_H
+}
+
+fn hide_prop_header(app: &App) {
+    unsafe {
+        for h in [
+            app.ctrl.prop_title,
+            app.ctrl.prop_parent,
+            app.ctrl.prop_filter_label,
+            app.ctrl.prop_filter,
+            app.ctrl.prop_count,
+        ] {
+            let _ = ShowWindow(h, SW_HIDE);
+        }
+    }
+}
 
 fn layout(app: &App) {
     unsafe {
@@ -1439,6 +1768,7 @@ fn layout(app: &App) {
                 show(app.ctrl.expand_text, false);
                 show(app.ctrl.expand_copy, false);
                 show(app.ctrl.expand_collapse, false);
+                hide_prop_header(app);
                 let _ = SetWindowPos(app.ctrl.editor, HWND(std::ptr::null_mut()), 8, content_y, w - 16, content_h, SWP_NOZORDER);
             }
             AppTab::Viewer => {
@@ -1478,8 +1808,12 @@ fn layout(app: &App) {
                 if grid_on {
                     let tree_w = ((w - 24) * 68) / 100;
                     place_tree_with_expand(8, tree_w);
-                    let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), 16 + tree_w, content_y, w - 24 - tree_w, content_h, SWP_NOZORDER);
+                    let grid_x = 16 + tree_w;
+                    let grid_w = w - 24 - tree_w;
+                    let grid_y = layout_prop_header(app, grid_x, content_y, grid_w);
+                    let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), grid_x, grid_y, grid_w, content_h - PROP_HEADER_H, SWP_NOZORDER);
                 } else {
+                    hide_prop_header(app);
                     place_tree_with_expand(8, w - 16);
                 }
             }
@@ -1519,8 +1853,12 @@ fn layout(app: &App) {
                 if grid_on {
                     let tree_w = (rest_w * 65) / 100;
                     place_tree_with_expand(rest_x, tree_w);
-                    let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), rest_x + tree_w + 8, content_y, rest_w - tree_w - 8, content_h, SWP_NOZORDER);
+                    let grid_x = rest_x + tree_w + 8;
+                    let grid_w = rest_w - tree_w - 8;
+                    let grid_y = layout_prop_header(app, grid_x, content_y, grid_w);
+                    let _ = SetWindowPos(app.ctrl.grid, HWND(std::ptr::null_mut()), grid_x, grid_y, grid_w, content_h - PROP_HEADER_H, SWP_NOZORDER);
                 } else {
+                    hide_prop_header(app);
                     place_tree_with_expand(rest_x, rest_w);
                 }
             }
@@ -1562,7 +1900,7 @@ unsafe fn build_menu() -> HMENU {
         let m = CreatePopupMenu().unwrap_or(HMENU(std::ptr::null_mut()));
         for (id, label) in items {
             if *id == 0 {
-                AppendMenuW(m, MF_SEPARATOR, 0, None);
+                let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
             } else {
                 let w = wide(label);
                 let _ = AppendMenuW(m, MF_STRING, *id as usize, windows::core::PCWSTR::from_raw(w.as_ptr()));
@@ -1693,13 +2031,7 @@ extern "system" fn search_edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 if APP_PTR != 0 {
                     let main = HWND(APP_PTR as *mut std::ffi::c_void);
                     if let Some(app) = app_of(main) {
-                        // Copy the target HWND first, then act without holding
-                        // the borrow across SendMessage.
-                        let se = app.ctrl.search_edit;
-                        app.model.clear_search();
-                        clear_search_marks_and_repaint(app);
-                        set_window_text(se, "");
-                        refresh_status(app);
+                        clear_search_ui(app);
                     }
                 }
                 return LRESULT(0);
@@ -1734,7 +2066,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let cs = lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
                 let params = (*cs).lpCreateParams as *mut CreateParams;
                 let params = Box::from_raw(params);
-                if !init_app(hwnd, params.settings.clone(), params.store.clone()) {
+                if !init_app(hwnd, params.settings.clone(), params.store.clone(), params.initial_file.clone()) {
                     return LRESULT(-1);
                 }
                 LRESULT(0)
@@ -1766,6 +2098,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     if ctrl_hwnd == app.ctrl.editor && code == EN_CHANGE {
                         if !app.syncing_editor {
                             app.model.is_dirty = true;
+                            // Split keeps the last successfully parsed tree on
+                            // screen; flag it immediately so the status bar
+                            // warns before the debounced re-parse runs.
+                            if matches!(app.model.active_tab, AppTab::Split)
+                                && app.model.root.is_some()
+                            {
+                                app.tree_stale = true;
+                                refresh_status(app);
+                            }
                             let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(hwnd, TIMER_LIVE_PARSE);
                             let _ = windows::Win32::UI::WindowsAndMessaging::SetTimer(hwnd, TIMER_LIVE_PARSE, 500, None);
                         }
@@ -1773,6 +2114,27 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     }
                     if ctrl_hwnd == app.ctrl.search_edit && code == EN_CHANGE {
                         app.model.search_query = get_window_text(app.ctrl.search_edit);
+                        // Emptying the query clears results immediately, like
+                        // the macOS/Linux search bars, and returns the tree
+                        // viewport to the root.
+                        if app.model.search_query.trim().is_empty() {
+                            app.model.clear_search();
+                            clear_search_marks_and_repaint(app);
+                            stop_search_poll(app);
+                            scroll_tree_to_root(app);
+                            refresh_status(app);
+                        }
+                        return LRESULT(0);
+                    }
+                    if ctrl_hwnd == app.ctrl.prop_filter && code == EN_CHANGE {
+                        if !app.syncing_filter {
+                            let text = get_window_text(app.ctrl.prop_filter);
+                            if text != app.prop_filter {
+                                app.prop_filter = text;
+                                refresh_grid(app);
+                                refresh_status(app);
+                            }
+                        }
                         return LRESULT(0);
                     }
                     if code == BN_CLICKED || lparam.0 == 0 {
@@ -1803,38 +2165,79 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 return LRESULT(CDRF_NEWFONT as isize);
                             }
                             // Search highlight (mac MATCH parity). Two layers:
-                            // 1. The model-selected path always gets the brown
+                            // 1. The model-selected ID always gets the brown
                             //    selection background — even if the TreeView
                             //    caret itself didn't follow (stale caret after
-                            //    chunked fills / programmatic jumps). This is
-                            //    what makes search land visibly "like manual".
+                            //    chunked fills / programmatic jumps).
                             // 2. Other matches get bright yellow text.
                             let item = cd.nmcd.dwItemSpec as isize;
-                            if let Some(path) = app.item_to_path.get(&item) {
-                                if app.model.selected_path.as_ref() == Some(path) {
+                            if let Some(id) = app.item_to_id.get(&item) {
+                                if app.model.selected_id.as_ref() == Some(id) {
                                     cd.clrText = COLORREF(DARK_TEXT);
                                     cd.clrTextBk = COLORREF(DARK_ACCENT_BG);
                                     return LRESULT(CDRF_NEWFONT as isize);
                                 }
-                                if app.search_marks.contains(path) {
+                                if app.search_marks.contains(id) {
                                     cd.clrText = COLORREF(SEARCH_MATCH_TEXT);
                                     cd.clrTextBk = COLORREF(DARK_EDIT_BG);
                                     return LRESULT(CDRF_NEWFONT as isize);
                                 }
                             }
+                            // Type colours matching the macOS tree badges.
+                            if let Some(t) = app.item_type.get(&item) {
+                                cd.clrText = COLORREF(type_color(t));
+                                cd.clrTextBk = COLORREF(DARK_EDIT_BG);
+                                return LRESULT(CDRF_NEWFONT as isize);
+                            }
                             return LRESULT(CDRF_DODEFAULT as isize);
+                        }
+                        return LRESULT(CDRF_DODEFAULT as isize);
+                    }
+                    if hdr.hwndFrom == app.ctrl.grid && hdr.code == NM_CUSTOMDRAW {
+                        let cd = &mut *(lparam.0 as *mut NMLVCUSTOMDRAW);
+                        let stage = cd.nmcd.dwDrawStage.0;
+                        if stage == CDDS_PREPAINT.0 {
+                            return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
+                        }
+                        if stage == CDDS_ITEMPREPAINT.0 {
+                            return LRESULT(CDRF_NOTIFYSUBITEMDRAW as isize);
+                        }
+                        if stage == (CDDS_ITEMPREPAINT.0 | CDDS_SUBITEM.0) {
+                            if let Some(row) = app.grid_rows.get(cd.nmcd.dwItemSpec as usize) {
+                                cd.clrText = COLORREF(match cd.iSubItem {
+                                    0 => 0x00FEDC9C, // property name #9CDCFE
+                                    1 => type_color(&row.typ),
+                                    2 => DARK_DIM_TEXT,
+                                    _ => DARK_TEXT,
+                                });
+                            }
+                            return LRESULT(CDRF_NEWFONT as isize);
                         }
                         return LRESULT(CDRF_DODEFAULT as isize);
                     }
                     if hdr.hwndFrom == app.ctrl.tree && hdr.code == TVN_SELCHANGEDW {
                         let info = &*(lparam.0 as *const NMTREEVIEWW);
                         let item = info.itemNew.hItem.0 as isize;
-                        if let Some(path) = app.item_to_path.get(&item).cloned() {
-                            app.model.selected_path = Some(path);
+                        if let Some(id) = app.item_to_id.get(&item).cloned() {
+                            app.model.set_selected(id);
                             refresh_grid(app);
                             refresh_expand_panel(app);
                             refresh_status(app);
                             layout(app);
+                        }
+                        return LRESULT(0);
+                    }
+                    // Track the user's expanded branches so a Split-mode
+                    // rebuild can restore them (macOS parity).
+                    if hdr.hwndFrom == app.ctrl.tree && hdr.code == TVN_ITEMEXPANDEDW {
+                        let info = &*(lparam.0 as *const NMTREEVIEWW);
+                        let item = info.itemNew.hItem.0 as isize;
+                        if let Some(id) = app.item_to_id.get(&item).cloned() {
+                            if info.action == TVE_EXPAND {
+                                app.expanded_ids.insert(id);
+                            } else if info.action == TVE_COLLAPSE {
+                                app.expanded_ids.remove(&id);
+                            }
                         }
                         return LRESULT(0);
                     }
@@ -1845,9 +2248,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         let idx = send(app.ctrl.grid, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize) as i32;
                         if idx >= 0 {
                             if let Some(row) = app.grid_rows.get(idx as usize) {
-                                let target = row.path.clone();
-                                app.model.selected_path = Some(target.clone());
-                                reveal_path(app, &target, true);
+                                let target = row.id.clone();
+                                app.model.set_selected(target.clone());
+                                reveal_id(app, &target, true);
                                 refresh_grid(app);
                                 // Rebuilding deletes/recreates every row, which
                                 // drops the selection — and a lost selection is
@@ -1855,7 +2258,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                                 // click landed on a selection-less list, so the
                                 // expand lookup found nothing). Restore it.
                                 if let Some(pos) =
-                                    app.grid_rows.iter().position(|r| r.path == target)
+                                    app.grid_rows.iter().position(|r| r.id == target)
                                 {
                                     let mut lv = LVITEMW::default();
                                     lv.state = LVIS_SELECTED;
@@ -1882,14 +2285,14 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     if hdr.hwndFrom == app.ctrl.tree && hdr.code == windows::Win32::UI::Controls::NM_DBLCLK {
                         let caret = send(app.ctrl.tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0);
                         if caret != 0 {
-                            if let Some(path) = app.item_to_path.get(&(caret as isize)).cloned() {
-                                if let Some(n) = app.model.find_node(&path) {
+                            if let Some(id) = app.item_to_id.get(&(caret as isize)).cloned() {
+                                if let Some(n) = app.model.find_node(&id) {
                                     if let crate::json::JSONValue::Str(_) = &n.value {
                                         if n.is_long_text() {
-                                            app.model.selected_path = Some(path.clone());
+                                            app.model.set_selected(id.clone());
                                             refresh_grid(app);
                                             refresh_status(app);
-                                            toggle_expand_inline(app, path);
+                                            toggle_expand_inline(app, id);
                                         }
                                     }
                                 }
@@ -1910,21 +2313,21 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         if idx >= 0 {
                             if let Some(row) = app.grid_rows.get(idx as usize).cloned() {
                                 let mut expanded = false;
-                                if let Some(n) = app.model.find_node(&row.path) {
+                                if let Some(n) = app.model.find_node(&row.id) {
                                     if let crate::json::JSONValue::Str(s) = &n.value {
                                         if n.is_long_text() || s.chars().count() > 200 {
-                                            app.model.selected_path = Some(row.path.clone());
-                                            reveal_path(app, &row.path, true);
+                                            app.model.set_selected(row.id.clone());
+                                            reveal_id(app, &row.id, true);
                                             refresh_grid(app);
                                             refresh_status(app);
-                                            show_expand_inline(app, row.path.clone());
+                                            show_expand_inline(app, row.id.clone());
                                             expanded = true;
                                         }
                                     }
                                 }
                                 if !expanded {
                                     // Focus the tree after jumping.
-                                    reveal_path(app, &row.path, true);
+                                    reveal_id(app, &row.id, true);
                                     refresh_expand_panel(app);
                                     refresh_status(app);
                                     layout(app);
@@ -1949,6 +2352,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     if let Some(app) = app_of(hwnd) {
                         fill_tick(app);
                     }
+                } else if wparam.0 == TIMER_SEARCH {
+                    if let Some(app) = app_of(hwnd) {
+                        apply_search_completion(app);
+                    }
                 } else if wparam.0 == TIMER_LIVE_PARSE {
                     let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(hwnd, TIMER_LIVE_PARSE);
                     if let Some(app) = app_of(hwnd) {
@@ -1968,14 +2375,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         {
                             parse_and_view(app, true);
                         } else if big && app.model.is_dirty {
-                            unsafe {
-                                let note = format!(
-                                    "{}    |    {}    |    large file — press Refresh to update tree",
-                                    app.model.status_text(),
-                                    app.model.metrics_text()
-                                );
-                                set_window_text(app.ctrl.status, &note);
-                            }
+                            refresh_status(app);
                         }
                     }
                 }
@@ -2040,6 +2440,34 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            WM_DROPFILES => {
+                let hdrop = HDROP(wparam.0 as *mut std::ffi::c_void);
+                let len = DragQueryFileW(hdrop, 0, None);
+                if len > 0 {
+                    let mut buf = vec![0u16; len as usize + 1];
+                    DragQueryFileW(hdrop, 0, Some(&mut buf));
+                    let path = std::path::PathBuf::from(String::from_utf16_lossy(
+                        &buf[..len as usize],
+                    ));
+                    if let Some(app) = app_of(hwnd) {
+                        let settings = app.settings.lock().unwrap().clone();
+                        match app.model.load_file(&path, &settings) {
+                            Ok(_) => {
+                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                    set_window_text(hwnd, &format!("JSON Viewer — {}", name));
+                                }
+                                app.expanded_ids.clear();
+                                app.tree_stale = false;
+                                refresh_editor(app);
+                                refill_tree_after_model_change(app, false);
+                            }
+                            Err(e) => show_error(hwnd, &e),
+                        }
+                    }
+                }
+                DragFinish(hdrop);
+                LRESULT(0)
+            }
             WM_APP_SETTINGS_CHANGED => {
                 if let Some(app) = app_of(hwnd) {
                     save_settings(app);
@@ -2057,24 +2485,22 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             WM_NCDESTROY => {
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
                 if !ptr.is_null() {
-                    unsafe {
-                        let app = Box::from_raw(ptr);
-                        if !app.font_mono.is_invalid() {
-                            DeleteObject(app.font_mono);
-                        }
-                        if !app.font_ui.is_invalid() {
-                            DeleteObject(app.font_ui);
-                        }
-                        if !app.brush_edit.is_invalid() {
-                            DeleteObject(app.brush_edit);
-                        }
-                        if !app.brush_chrome.is_invalid() {
-                            DeleteObject(app.brush_chrome);
-                        }
+                    let app = Box::from_raw(ptr);
+                    if !app.font_mono.is_invalid() {
+                        let _ = DeleteObject(app.font_mono);
+                    }
+                    if !app.font_ui.is_invalid() {
+                        let _ = DeleteObject(app.font_ui);
+                    }
+                    if !app.brush_edit.is_invalid() {
+                        let _ = DeleteObject(app.brush_edit);
+                    }
+                    if !app.brush_chrome.is_invalid() {
+                        let _ = DeleteObject(app.brush_chrome);
                     }
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
-                unsafe { APP_PTR = 0; }
+                APP_PTR = 0;
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -2142,7 +2568,7 @@ fn show_tree_context_menu(app: &mut App, lparam: isize) {
         let item: isize = if screen_x == -1 && screen_y == -1 {
             send(tree, TVM_GETNEXTITEM, TVGN_CARET as usize, 0)
         } else {
-            let mut pt = POINT { x: screen_x, y: screen_y };
+            let pt = POINT { x: screen_x, y: screen_y };
             let mut client = pt;
             let _ = ScreenToClient(tree, &mut client);
             let mut hit = TVHITTESTINFO {
@@ -2161,27 +2587,27 @@ fn show_tree_context_menu(app: &mut App, lparam: isize) {
         if item == 0 {
             return;
         }
-        let path = match app.item_to_path.get(&item).cloned() {
-            Some(p) => p,
+        let id = match app.item_to_id.get(&item).cloned() {
+            Some(id) => id,
             None => return,
         };
         // Select what was right-clicked (mac behavior).
         send(tree, TVM_SELECTITEM, TVGN_CARET as usize, item);
-        app.model.selected_path = Some(path.clone());
+        app.model.set_selected(id.clone());
         refresh_grid(app);
         refresh_expand_panel(app);
         refresh_status(app);
         layout(app);
-        app.ctx_path = Some(path.clone());
+        app.ctx_id = Some(id.clone());
 
         let is_container = app
             .model
-            .find_node(&path)
+            .find_node(&id)
             .map(|n| n.is_container())
             .unwrap_or(false);
         let is_long = app
             .model
-            .find_node(&path)
+            .find_node(&id)
             .map(|n| n.is_long_text())
             .unwrap_or(false);
 
@@ -2196,7 +2622,7 @@ fn show_tree_context_menu(app: &mut App, lparam: isize) {
             entries.push((0, ""));
         } else if is_long {
             // Inline (no "…" — no separate dialog opens anymore).
-            let label = if app.expand_visible && app.expand_path.as_ref() == Some(&path) {
+            let label = if app.expand_visible && app.expand_id.as_ref() == Some(&id) {
                 "Collapse Full Text"
             } else {
                 "Expand Full Text"
@@ -2240,13 +2666,13 @@ fn expand_subtree_items(tree: HWND, item: isize) {
 }
 
 /// Copy helpers for the tree context menu (always act on the right-clicked
-/// node stored in `ctx_path`).
+/// node stored in `ctx_id`).
 fn ctx_copy(app: &mut App, kind: &str) {
-    let path = match app.ctx_path.clone() {
-        Some(p) => p,
+    let id = match app.ctx_id.clone() {
+        Some(id) => id,
         None => return,
     };
-    let node = match app.model.find_node(&path) {
+    let node = match app.model.find_node(&id) {
         Some(n) => n.clone(),
         None => return,
     };
@@ -2307,8 +2733,8 @@ fn accel_copy(app: &mut App) {
         }
         let focus = GetFocus();
         if focus == app.ctrl.tree {
-            if let Some(p) = app.model.selected_path.clone() {
-                if let Some(n) = app.model.find_node(&p) {
+            if let Some(id) = app.model.selected_id.clone() {
+                if let Some(n) = app.model.find_node(&id) {
                     let t = n.value.format(2, false, false);
                     if clipboard::set_text(&t) {
                         set_window_text(app.ctrl.status, "Copied Subtree as JSON!");
@@ -2421,8 +2847,12 @@ fn handle_command(app: &mut App, id: u32) {    match id {
         IDC_BTN_PASTE => do_paste(app),
         IDC_BTN_CLEAR => {
             app.model.clear();
+            app.expanded_ids.clear();
+            app.tree_stale = false;
+            stop_search_poll(app);
             refresh_editor(app);
-            begin_tree_fill(app);
+            refresh_status(app);
+            begin_tree_fill(app, false);
         }
         IDC_BTN_EXPAND => {
             let _ = parse_and_view(app, true);
@@ -2461,6 +2891,14 @@ fn handle_command(app: &mut App, id: u32) {    match id {
             app.props_visible = !app.props_visible;
             layout(app);
         }
+        IDC_PROPS_PARENT => {
+            // macOS "← Parent" breadcrumb jump.
+            if let Some(parent) = app.model.parent_of_selected() {
+                app.model.set_selected(parent.id.clone());
+                reveal_selected(app, true);
+                refresh_status(app);
+            }
+        }
         IDC_BTN_FIND => unsafe {
             if matches!(app.model.active_tab, AppTab::Text) {
                 set_tab(app, AppTab::Split);
@@ -2480,15 +2918,15 @@ fn handle_command(app: &mut App, id: u32) {    match id {
         IDM_ACCEL_CUT => accel_cut(app),
         IDM_ACCEL_SELECTALL => accel_select_all(app),
         IDM_CTX_EXPAND_SUB => {
-            if let Some(p) = app.ctx_path.clone() {
-                if let Some(&item) = app.path_to_item.get(&p) {
+            if let Some(id) = app.ctx_id.clone() {
+                if let Some(&item) = app.id_to_item.get(&id) {
                     expand_subtree_items(app.ctrl.tree, item);
                 }
             }
         }
         IDM_CTX_COLLAPSE => {
-            if let Some(p) = app.ctx_path.clone() {
-                if let Some(&item) = app.path_to_item.get(&p) {
+            if let Some(id) = app.ctx_id.clone() {
+                if let Some(&item) = app.id_to_item.get(&id) {
                     tree_expand_by_hwnd(app.ctrl.tree, item, false);
                 }
             }
@@ -2500,11 +2938,11 @@ fn handle_command(app: &mut App, id: u32) {    match id {
         IDM_CTX_COPY_PYTHON => ctx_copy(app, "python"),
         IDM_CTX_EXPAND_TEXT => {
             // Inline toggle (macOS parity) — no separate popup window.
-            if let Some(p) = app.ctx_path.clone() {
-                app.model.selected_path = Some(p.clone());
+            if let Some(id) = app.ctx_id.clone() {
+                app.model.set_selected(id.clone());
                 refresh_grid(app);
                 refresh_status(app);
-                toggle_expand_inline(app, p);
+                toggle_expand_inline(app, id);
             }
         }
         IDC_EXPAND_COPY => copy_expand_text(app),
@@ -2527,7 +2965,12 @@ fn open_settings_dialog(app: &App) {
     settings_dialog::open_settings(ctx);
 }
 
-fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) -> bool {
+fn init_app(
+    hwnd: HWND,
+    settings: Arc<Mutex<Settings>>,
+    store: Arc<Mutex<SettingsStore>>,
+    initial_file: Option<std::path::PathBuf>,
+) -> bool {
     unsafe {
         let instance = HINSTANCE(GetModuleHandleW(None).unwrap_or_default().0);
         let current = settings.lock().unwrap().clone();
@@ -2622,6 +3065,8 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
         for h in [search_label, search_go, search_prev, search_next, search_status] {
             set_font(h, font_ui);
         }
+        let search_cue = wide("Search keys, values, paths...");
+        send(search_edit, EM_SETCUEBANNER, 1, search_cue.as_ptr() as isize);
 
         // Inline expand panel (macOS expanded big-text parity): docked below
         // the tree, inside the main window — no separate popup.
@@ -2642,13 +3087,22 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
         let status = make_static(hwnd, "Ready", IDC_STATUS, instance, SS_CENTERIMAGE);
         let path = make_static(hwnd, "$", IDC_PATH, instance, SS_CENTERIMAGE);
 
+        // Property inspector header: title, parent jump, filter, item count.
+        let prop_title = make_static(hwnd, "Properties", IDC_PROPS_TITLE, instance, SS_CENTERIMAGE);
+        let prop_parent = make_button(hwnd, "← Parent", IDC_PROPS_PARENT, instance);
+        let prop_filter_label = make_static(hwnd, "Filter:", IDC_PROPS_FILTER_LABEL, instance, SS_CENTERIMAGE);
+        let prop_filter = create_child(hwnd, &edit_class(), "", IDC_PROPS_FILTER,
+            WS_CHILD_VISIBLE | WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32, 0, instance);
+        let filter_cue = wide("Filter properties...");
+        send(prop_filter, EM_SETCUEBANNER, 1, filter_cue.as_ptr() as isize);
+        let prop_count = make_static(hwnd, "", IDC_PROPS_COUNT, instance, SS_CENTERIMAGE | 0x0002); // SS_RIGHT
+
         let menu = build_menu();
-        SetMenu(hwnd, menu);
-        DrawMenuBar(hwnd);
+        let _ = SetMenu(hwnd, menu);
+        let _ = DrawMenuBar(hwnd);
 
         let mut app = Box::new(App {
             hwnd,
-            instance,
             settings: settings.clone(),
             store: store.clone(),
             model: DocumentModel::new(&current),
@@ -2658,16 +3112,23 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
                 expand_label, expand_text, expand_copy, expand_collapse,
                 search_label, search_edit, search_go, search_prev, search_next, search_status,
                 status, path,
+                prop_title, prop_parent, prop_filter_label, prop_filter, prop_count,
             },
             font_mono,
             font_ui,
             brush_edit: CreateSolidBrush(COLORREF(DARK_EDIT_BG)),
             brush_chrome: CreateSolidBrush(COLORREF(DARK_CHROME_BG)),
-            item_to_path: HashMap::new(),
-            path_to_item: HashMap::new(),
+            item_to_id: HashMap::new(),
+            id_to_item: HashMap::new(),
+            item_type: HashMap::new(),
             container_items: Vec::new(),
+            expanded_ids: HashSet::new(),
             grid_rows: Vec::new(),
+            grid_parent: None,
             grid_truncated: None,
+            grid_total: 0,
+            prop_filter: String::new(),
+            syncing_filter: false,
             syncing_editor: false,
             syncing_grid: false,
             props_visible: true,
@@ -2675,10 +3136,11 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
             fill: None,
             fill_gen: 0,
             tree_complete: false,
+            tree_stale: false,
             expand_on_fill_done: false,
-            ctx_path: None,
+            ctx_id: None,
             expand_visible: false,
-            expand_path: None,
+            expand_id: None,
             search_marks: HashSet::new(),
         });
 
@@ -2699,8 +3161,20 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
 
         apply_font_to_controls(&app);
         apply_dark_theme_to_views(&app);
+        // Accept files dragged onto the window (Shell drag/drop).
+        DragAcceptFiles(hwnd, BOOL(1));
+        if let Some(path) = initial_file {
+            match app.model.load_file(&path, &current) {
+                Ok(_) => {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        set_window_text(hwnd, &format!("JSON Viewer — {}", name));
+                    }
+                }
+                Err(e) => show_error(hwnd, &e),
+            }
+        }
         refresh_editor(&mut app);
-        begin_tree_fill(&mut app);
+        begin_tree_fill(&mut app, false);
 
         // Subclass search edit for Enter/Escape handling (the only child
         // subclass — editor/tree/grid stay native so SendMessage from the
@@ -2723,7 +3197,11 @@ fn init_app(hwnd: HWND, settings: Arc<Mutex<Settings>>, store: Arc<Mutex<Setting
 
 // ---------------- entry ----------------
 
-pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
+pub fn run(
+    settings: Arc<Mutex<Settings>>,
+    store: Arc<Mutex<SettingsStore>>,
+    initial_file: Option<std::path::PathBuf>,
+) {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let mut icc = INITCOMMONCONTROLSEX {
@@ -2751,7 +3229,7 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
         let _ = RegisterClassW(&wc);
 
         let title = wide("JSON Viewer");
-        let params = Box::new(CreateParams { settings, store });
+        let params = Box::new(CreateParams { settings, store, initial_file });
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             windows::core::PCWSTR::from_raw(class_name.as_ptr()),
@@ -2946,11 +3424,7 @@ pub fn run(settings: Arc<Mutex<Settings>>, store: Arc<Mutex<SettingsStore>>) {
                 }
                 LoopAction::ClearSearch => {
                     if let Some(app) = app_of(hwnd) {
-                        let se = app.ctrl.search_edit;
-                        app.model.clear_search();
-                        clear_search_marks_and_repaint(app);
-                        set_window_text(se, "");
-                        refresh_status(app);
+                        clear_search_ui(app);
                     }
                 }
                 LoopAction::SkipAccelerator => {

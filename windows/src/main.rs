@@ -15,5 +15,11 @@ fn main() {
     let store = settings::SettingsStore::new();
     let settings = Arc::new(Mutex::new(store.settings.clone()));
     let store = Arc::new(Mutex::new(store));
-    app::run(settings, store);
+    // Optional file path: "jsonviewer.exe document.json" (also used by
+    // "Open with" / shell associations when a file is double-clicked).
+    let initial_file = std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .find(|p| p.is_file());
+    app::run(settings, store, initial_file);
 }

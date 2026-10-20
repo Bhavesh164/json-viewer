@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=resources/resource.rc");
+    println!("cargo:rerun-if-changed=resources/app.manifest");
     let target = env::var("TARGET").unwrap_or_default();
     if !target.contains("windows") {
         return;

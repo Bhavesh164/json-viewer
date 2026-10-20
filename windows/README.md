@@ -23,7 +23,8 @@ windows/
 ├── .cargo/config.toml      # default target: x86_64-pc-windows-gnu
 ├── resources/
 │   ├── AppIcon.ico         # multi-size icon (16–256px) embedded in the .exe
-│   └── resource.rc         # resource script (icon ID 1 + version info)
+│   ├── app.manifest        # ComCtl v6, per-monitor DPI, supported OS, asInvoker
+│   └── resource.rc         # resource script (icon + manifest + version info)
 └── src/
     ├── main.rs             # entry point (windows_subsystem, message loop)
     ├── app.rs              # main window: editor, tree, grid, search, menus
@@ -57,19 +58,32 @@ windows/
 - **Text tab** — monospace editor with word-wrap setting, live line/character
   counts, and valid/invalid status with exact line/column errors.
 - **Split tab** — editor on the left with debounced live re-parse, tree on the
-  right.
+  right. If the editor becomes invalid the last good tree stays visible and
+  the status bar warns `Tree out of date — press Refresh to update`; a
+  successful parse preserves the selected node and expanded branches.
 - **Property inspector** — report-style grid showing the selected node's
-  properties (`Property / Value / Type`); double-click a row to jump to that
-  node in the tree.
+  properties (`Property / Value / Type`); double-click a row (or use Enter) to
+  jump to that node in the tree. A two-row header shows the inspected
+  container, a `← Parent` jump, a live property filter, and the row count.
+  Selecting a leaf inspects its parent, matching the macOS inspector.
+- **Repeated keys** — the parser keeps source order and repeated object keys
+  resolve to the last value while retaining the key's first position, matching
+  JavaScript/macOS. Node IDs are unique internal identifiers separate from JSON
+  paths, so selections and background-search results stay unambiguous even
+  when paths repeat across array items.
 - **Transforms** — Format (2 spaces / 4 spaces / tabs), Minify, Stringify
   (with `\/` escaping option), Unescape, JSON → Python dict, Python → JSON,
   plus Paste with automatic Python-dict-to-JSON conversion and Clear.
 - **Multi-format copy** — raw text, beautified, minified, stringified, or
   Python dictionary.
-- **Search** — query box with GO / Previous / Next, `N of M matches` status,
-  Enter/Shift+Enter navigation, Esc to clear; matches auto-expand ancestors
-  and reveal the node.
-- **File I/O** — Open / Save `.json` via native file dialogs (`Ctrl+O`/`Ctrl+S`).
+- **Search** — query box with GO / Previous / Next, `Searching…` progress and
+  `N of M matches` status, Enter/Shift+Enter navigation, Esc to clear; matches
+  auto-expand ancestors and reveal the node. Searches run on a cancellable
+  background worker, so editing or clearing the query never blocks on a large
+  document and stale results are discarded.
+- **File I/O** — Open / Save `.json` via native file dialogs (`Ctrl+O`/`Ctrl+S`),
+  drag a `.json` file onto the window, or pass a path on the command line
+  (`jsonviewer.exe document.json`, including shell "Open with").
 - **Settings** — indentation, slash escaping, key sorting, auto-unwrap of
   stringified JSON, default tab, font size (zoom `Ctrl++`/`Ctrl+-`/`Ctrl+0`),
   word wrap. Stored as JSON in `%APPDATA%\JSONViewer\config.json`.
@@ -104,10 +118,33 @@ The output binary is at:
 target/x86_64-pc-windows-gnu/release/jsonviewer.exe
 ```
 
+A copy of the verified release build is kept at `windows/dist/jsonviewer.exe`.
+
 `build.rs` automatically finds `windres` (or `rc.exe`), compiles
-`resources/resource.rc`, and links the icon + version info into the `.exe`. If
-no resource compiler is found the build still succeeds — it just won't have
-the embedded icon.
+`resources/resource.rc`, and links the icon, manifest, and version info into
+the `.exe`. If no resource compiler is found the build still succeeds — it
+just won't have the embedded resources.
+
+## Cross-compiling from macOS (x86_64)
+
+You can cross-compile the same target from Apple Silicon macOS with Homebrew's
+MinGW-w64 toolchain:
+
+```sh
+brew install mingw-w64
+rustup target add x86_64-pc-windows-gnu
+
+cd windows
+cargo build --release
+# → target/x86_64-pc-windows-gnu/release/jsonviewer.exe
+```
+
+`.cargo/config.toml` sets the GNU target by default. If the linker is not on
+`PATH`, point Cargo at it explicitly:
+
+```sh
+export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+```
 
 ## Cross-compiling from Linux (x86_64)
 
@@ -139,6 +176,28 @@ cd windows
 cargo build --release
 ```
 
+## Tests
+
+The document model has unit tests for repeated-key resolution, unique node
+IDs/selection, leaf property inspection, and cancellable background search:
+
+```sh
+cd windows
+cargo test            # on Windows
+cargo test --no-run   # cross-compile the test binary
+```
+
+For the cross-compiled binary, run the test executable under Wine:
+
+```sh
+wine target/x86_64-pc-windows-gnu/debug/deps/jsonviewer-*.exe
+```
+
+GUI smoke tests were run on Linux/amd64 Docker with Wine 8 and Xvfb:
+Viewer/Text/Split rendering, property header/filter/parent jump, search
+reveal/status, clear-search scroll-to-root, repeated keys, and command-line
+file open.
+
 ## Embedding the icon
 
 The app icon (`resources/AppIcon.ico`) is embedded into the `.exe` at build
@@ -157,8 +216,9 @@ convert Resources/AppIcon.png -define icon:auto-resize=256,128,64,48,32,16 \
 imports Windows system DLLs that ship with every Windows 10/11 install:
 
 ```
-kernel32.dll, user32.dll, gdi32.dll, comctl32.dll, comdlg32.dll,
-oleaut32.dll, userenv.dll, ws2_32.dll, ntdll.dll, ...
+api-ms-win-core-synch-l1-2-0.dll, bcryptprimitives.dll, kernel32.dll,
+msvcrt.dll, comctl32.dll, comdlg32.dll, dwmapi.dll, gdi32.dll, ntdll.dll,
+oleaut32.dll, shell32.dll, user32.dll, uxtheme.dll
 ```
 
 There is **no** dependency on `VCRUNTIME140.dll`, `libgcc_s_seh-1.dll`,
@@ -168,10 +228,17 @@ single `jsonviewer.exe` to any Windows 10/11 machine and run it directly.
 ## Code signing (SmartScreen)
 
 The binary is **unsigned**. On first launch Windows SmartScreen may show
-"Windows protected your PC" — click **More info → Run anyway**. This is normal
-for any unsigned application. Permanently suppressing the warning requires a
-purchased **Authenticode code-signing certificate**, which is a commercial
-purchase, not a build-tooling change.
+"Windows protected your PC" — click **More info → Run anyway**. Some antivirus
+engines may also flag a small, unsigned, freshly built MinGW executable
+heuristically. The release build already reduces avoidable triggers: it embeds
+an icon, application manifest, and version/company metadata; it is statically
+linked and **not** packed or obfuscated; and it makes no network requests.
+Those steps help, but they cannot guarantee a clean reputation score.
+
+Permanently suppressing SmartScreen/AV warnings requires a purchased
+**Authenticode code-signing certificate** (ideally EV) and, for ongoing
+reputation, a consistent signing identity. False positives can also be
+submitted to Microsoft and individual vendors for review.
 
 ## Settings
 

@@ -33,3 +33,10 @@ serde_json = "1"
 [[bin]]
 name = "jsonviewer"
 path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

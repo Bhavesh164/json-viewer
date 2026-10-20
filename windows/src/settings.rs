@@ -48,14 +48,6 @@ impl Settings {
     pub fn reset_to_defaults(&mut self) {
         *self = Settings::default();
     }
-
-    pub fn indent_label(&self) -> String {
-        match self.indent_spaces {
-            4 => "4 Spaces".to_string(),
-            -1 => "Tabs".to_string(),
-            _ => "2 Spaces (Default)".to_string(),
-        }
-    }
 }
 
 pub struct SettingsStore {
