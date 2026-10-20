@@ -178,8 +178,9 @@ cargo build --release
 
 ## Tests
 
-The document model has unit tests for repeated-key resolution, unique node
-IDs/selection, leaf property inspection, and cancellable background search:
+The document model and parsers have unit tests for repeated-key resolution,
+unique node IDs/selection, leaf property inspection, cancellable background
+search, Python literals, and rejection of trailing garbage after a value:
 
 ```sh
 cd windows
@@ -193,10 +194,11 @@ For the cross-compiled binary, run the test executable under Wine:
 wine target/x86_64-pc-windows-gnu/debug/deps/jsonviewer-*.exe
 ```
 
-GUI smoke tests were run on Linux/amd64 Docker with Wine 8 and Xvfb:
+GUI smoke tests were run on Linux/amd64 Docker with Wine 11 and Xvfb:
 Viewer/Text/Split rendering, property header/filter/parent jump, search
-reveal/status, clear-search scroll-to-root, repeated keys, and command-line
-file open.
+reveal/status, clear-search scroll-to-root, repeated keys, command-line file
+open, drag-and-drop, and the Split stale-tree warning (including recovery
+after fixing the text).
 
 ## Embedding the icon
 
